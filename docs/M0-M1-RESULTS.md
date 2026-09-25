@@ -1,6 +1,6 @@
 # M0–M1 implementation evidence
 
-Implemented against the supplied `PATHSMITH_DESIGN.md`, `AGENTS.md`, and `pathsmith-design-pack/CODEX_KICKOFF.md`. The kickoff explicitly requests M0–M1 before the later product milestones. No reconstructed fixture pack was substituted.
+Implemented against the supplied `PATHSMITH_DESIGN.md`, `AGENTS.md`, and [kickoff](../CODEX_KICKOFF.md). The kickoff explicitly requests M0–M1 before the later product milestones. No reconstructed fixture pack was substituted.
 
 ## Delivered
 

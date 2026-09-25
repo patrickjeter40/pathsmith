@@ -1,0 +1,11 @@
+# Pathsmith project defaults. Review and merge; do not overwrite existing settings.
+# Standalone custom agents are discovered under .codex/agents/.
+# Deliberately leaves approvals, sandbox, network, MCP, and credentials unchanged.
+model = "gpt-6-sol"
+model_reasoning_effort = "medium"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 3
+default_subagent_model = "gpt-6-sol"
+default_subagent_reasoning_effort = "medium"

@@ -2,7 +2,11 @@
 
 Build, test, trace, and compare probabilistic decision workflows.
 
-**Implemented: M0–M1**, the first delivery requested by the supplied [kickoff](pathsmith-design-pack/CODEX_KICKOFF.md). This is a working offline execution foundation with a browser shell, not the completed POC. The [design](PATHSMITH_DESIGN.md) remains the product contract. The supplied schemas and support-routing fixtures are preserved unchanged.
+**Implemented: M0–M1**, the first delivery requested by the supplied [kickoff](CODEX_KICKOFF.md). This is a working offline execution foundation with a browser shell, not the completed POC. The [design](PATHSMITH_DESIGN.md) remains the product contract. The supplied schemas and support-routing fixtures are preserved unchanged.
+
+## Use the same Codex workflow on another device
+
+Clone this repository and open its root in Codex. The project includes [agent routing and setup instructions](PATHSMITH_AGENTS_README.md), `.codex/config.toml`, five custom agent profiles, and four project skills. Review and trust the project in the client, then start a new session and run the [visibility smoke test](docs/codex/SMOKE_TESTS.md). See the [device setup guide](docs/codex/INSTALL_WITH_CODEX.md) for the complete sequence. Account sign-in, personal settings, Git credentials, `.env`, and local reports stay on each device.
 
 ## Start
 

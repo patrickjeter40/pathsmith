@@ -1,9 +1,0 @@
-{
-  "formatVersion": "0.1",
-  "bindings": {
-    "decisions": {
-      "providerId": "jev",
-      "model": "jev-latest"
-    }
-  }
-}

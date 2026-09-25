@@ -1,6 +1,6 @@
 # Implementation contract
 
-The supplied folder initially contained only PATHSMITH_DESIGN.md. The owner then supplied pathsmith-design-pack/. Its AGENTS.md, schemas, and examples were copied into the workspace without changing the artifacts. The original pack remains intact. Its kickoff explicitly limits this first delivery to M0–M1.
+The supplied folder initially contained only PATHSMITH_DESIGN.md. The owner then supplied the design pack. Its AGENTS.md, schemas, and examples were copied into the workspace without changing the artifacts. The canonical design, schemas, examples, and artifact validation report were verified identical to the pack, and the original instructions remain in root AGENTS.md. The [kickoff](../../CODEX_KICKOFF.md) is preserved at the repository root with updated file references; it explicitly limits this first delivery to M0–M1. The duplicate pack folder is no longer required. The original pack is retained in Git history.
 
 JSON schemas in schemas/ are the authoritative wire contract and generate TypeScript wire types. Generation drift and equality of the duplicated expression/question definitions are checked offline. All runtime packages use ESM with actual built exports; the API is compiled with TypeScript decorator metadata. Node's built-in test runner tests built packages, including the Nest HTTP application, so no alternate transpiler changes server semantics. TypeScript 5.9.3 is pinned because the latest 7.x version is outside the installed linter's supported peer range. Dependencies and the lockfile are pinned.
 

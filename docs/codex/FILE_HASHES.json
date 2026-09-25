@@ -1,0 +1,26 @@
+{
+  "algorithm": "sha256",
+  "excludes": [
+    "docs/codex/FILE_HASHES.json"
+  ],
+  "files": {
+    ".agents/skills/pathsmith-provider/SKILL.md": "c7f3b5a51df73a1d02cad71b146eba4848ca036bf44b8acbd3849340a58f4293",
+    ".agents/skills/pathsmith-runtime/SKILL.md": "9dc3301af973537d6b06f548124758098cec96e8c4ca44e5f07c957bdf495977",
+    ".agents/skills/pathsmith-ui/SKILL.md": "679bab55a831b8e18b4191fa13725b341e599d44b0fe619bb509772ac22d7c58",
+    ".agents/skills/pathsmith-verification/SKILL.md": "e7c5144efa033480a598708f684210ded0bdc29282d4e14fb0f15ba30f7862b1",
+    ".codex/agents/pathsmith_architect.toml": "1df8fd4872baef00c14d56e298f7dbbff73f89acb549b26725f69ca3aa2d74cd",
+    ".codex/agents/pathsmith_explorer.toml": "95c1209a3bdb23effa97448773d1d43fc8231d5077f3e539ab2f32bc5b018f52",
+    ".codex/agents/pathsmith_implementer.toml": "26c03e974423ebdd46678ac2fb430d07f999d12f9f30265011a85b6e08412961",
+    ".codex/agents/pathsmith_reviewer.toml": "dff06436c90605f567511409c4b9bc13b9338e3d6d7832b59f542344c15b3bcd",
+    ".codex/agents/pathsmith_verifier.toml": "6a15995560c95acb69e47ce53f37eeeb4e9f18b2bca18a56ce924bd795c807d5",
+    ".codex/config.toml": "754108f04a2245e279a268e500e093ab4cc984712c6f0f4d9b52c51544b5c941",
+    "AGENTS.md": "bd8b39f4a8f74f3c97b6923b3a8631da43b8d99ce7797c4e92b9b5d5345fb081",
+    "PATHSMITH_AGENTS_README.md": "9e0f76b5dc8c9f103533a1f80ae2e352b99f4efda95355aa58416e70a13bbeca",
+    "docs/codex/AGENTS_ROUTING.md": "2af5ca2106dc3518d4935a21cdf8e0ed21da9e53139be389800ff3022466faaa",
+    "docs/codex/INSTALL_WITH_CODEX.md": "146982be3a0665f166ee694164ed5f44e5a54ddbd79f745489704fe6ecac1d8a",
+    "docs/codex/SMOKE_TESTS.md": "f86ce3db750a4880aa736127e7d2d2cbbe93c7feea6a99c1f3c1812d22f28aa8",
+    "docs/codex/SOURCES.md": "ea9b98d630b25bbabc013f53d0e5b65077a007f9b493a3b905277fb5695b1833",
+    "docs/codex/VALIDATION_REPORT.md": "c2d064089bcab7d1916edca30f19884e93feb9b9ae1cadf5a97d963876e1c16a",
+    "scripts/validate-pathsmith-agents.py": "fdeeef64c6a8b57e90f12bcf63f2f314d0142f51dabc33f03e06f43e72582c2e"
+  }
+}

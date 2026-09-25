@@ -7,7 +7,6 @@ export default ts.config(
       "**/dist/**",
       "**/node_modules/**",
       ".tooling/**",
-      "pathsmith-design-pack/**",
       "packages/contracts/src/generated/**",
       "playwright-report/**",
       "test-results/**",

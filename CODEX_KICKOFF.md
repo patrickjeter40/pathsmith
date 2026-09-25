@@ -1,15 +1,15 @@
 # Codex kickoff
 
-Provide Codex the entire design-pack folder, not just the expected-results JSON. Paste the following prompt in the target repository. These instructions ask for implementation; the commands and packages in the design do not already exist.
+The supplied design artifacts are now maintained directly in this repository: `PATHSMITH_DESIGN.md`, `AGENTS.md`, `schemas/`, `examples/support-routing/`, and `docs/ARTIFACT_VALIDATION_REPORT.md`. These prompts request implementation; inspect the current implementation and milestone evidence before using them. The initial M0–M1 delivery is recorded in `docs/M0-M1-RESULTS.md`.
 
 ## Initial prompt: scaffold M0 and M1
 
 ```text
-Build the initial Pathsmith project from the design pack in this repository.
+Build the initial Pathsmith project from the design artifacts in this repository.
 
 First read AGENTS.md, PATHSMITH_DESIGN.md (or docs/PATHSMITH_DESIGN.md if it has
 already been moved), the three schemas, the support-routing example README,
-and VALIDATION_REPORT.md. Inspect the existing repository before changing it.
+and docs/ARTIFACT_VALIDATION_REPORT.md. Inspect the existing repository before changing it.
 Preserve unrelated existing files.
 
 Implement M0 and M1 of the design, not the entire future product at once.
