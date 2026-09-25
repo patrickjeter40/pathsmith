@@ -1,0 +1,15 @@
+# Implementation contract
+
+The supplied folder initially contained only PATHSMITH_DESIGN.md. The owner then supplied pathsmith-design-pack/. Its AGENTS.md, schemas, and examples were copied into the workspace without changing the artifacts. The original pack remains intact. Its kickoff explicitly limits this first delivery to M0–M1.
+
+JSON schemas in schemas/ are the authoritative wire contract and generate TypeScript wire types. Generation drift and equality of the duplicated expression/question definitions are checked offline. All runtime packages use ESM with actual built exports; the API is compiled with TypeScript decorator metadata. Node's built-in test runner tests built packages, including the Nest HTTP application, so no alternate transpiler changes server semantics. TypeScript 5.9.3 is pinned because the latest 7.x version is outside the installed linter's supported peer range. Dependencies and the lockfile are pinned.
+
+No public license, package publication, hosted deployment, or live model call is authorized by this implementation task. Jev transport is deferred to M4, not implemented or tested here. Its current official reference was reviewed at https://docs.typesafe.ai/api; implementation must recheck it when M4 begins. Optional live execution will require a server enable flag, a server-side key, and explicit run consent.
+
+The M1 CLI also compares actual mock reports to verify the specified two regressions and one improvement. This pure evaluation operation is shared and does not implement the M3 comparison UI. Replay package and storage package boundaries explicitly report their deferred status. `db:migrate` explains that persistence is not implemented, rather than pretending a migration occurred. The API health response likewise reports database availability as not implemented.
+
+The development machine has Node 20 globally. A project-local Node 24.21.0 and pnpm 10.33.0 were installed under ignored .tooling/ instead of changing the global runtime. scripts/pnpm.ps1 temporarily selects them for each command. No unrelated system configuration was changed.
+
+An independent architecture review found that AST operation limits alone do not bound JSON expansion through repeated references. The implementation therefore adds a 512 KiB computed-value limit, an 8 MiB retained scenario-artifact budget, and a 64 MiB aggregate report budget. These are explicit defensive refinements to the initial design, recorded in run limits where applicable. JSON size is measured before cloning/serialization without expanding shared subtrees; deep freezing tracks previously visited objects. Resource exhaustion is an inspectable execution error, never a normal outcome.
+
+Run reports use compact JSON and a separate 64 MiB reader bound; workflow and suite/fixture imports retain their specified 512 KiB / 8 MiB bounds. Aggregate report elements are bounded by serialized bytes, avoiding a reader-only element limit that would reject the writer's own supported reports. Comparison re-evaluates each completed scenario's authored expectations against saved results and rejects incomplete or inconsistent assertion records as inconclusive.

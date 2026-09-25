@@ -1,0 +1,277 @@
+{
+  "formatVersion": "0.1",
+  "id": "support_routing_examples",
+  "name": "Support routing acceptance scenarios",
+  "description": "Twelve authored cases. Expected outcomes are illustrative product policy, not verified model labels. Case technical_threshold_079 intentionally fails the baseline and improves under the candidate.",
+  "scenarios": [
+    {
+      "id": "billing_routine",
+      "name": "Routine invoice request",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "Please send a copy of last month's invoice for our records.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "billing_standard"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "billing_urgent",
+      "name": "Time-sensitive billing",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "A duplicate charge has blocked our purchasing account. We need this fixed before today's supplier deadline.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "billing_priority"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "technical_blocked",
+      "name": "Blocking technical outage",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "Nobody can log in and our orders are stopped. There is no alternate way to process them.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "technical_priority"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "technical_workaround",
+      "name": "Technical issue with workaround",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "Export to PDF is broken. CSV export works and lets us finish the reports for now.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "technical_standard"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "sales_pricing",
+      "name": "New purchase inquiry",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "Can you explain the pricing for a new ten-person subscription?",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "sales_route"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "ambiguous_department",
+      "name": "Ambiguous request",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "Something about the account needs attention, but I do not have details yet.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "manual_review"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "other_topic",
+      "name": "Out-of-scope request",
+      "tags": [
+        "synthetic",
+        "business-routing"
+      ],
+      "input": {
+        "message": "Where can I send a suggestion for your company newsletter?",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "manual_review"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "billing_threshold_075",
+      "name": "Confidence between thresholds",
+      "tags": [
+        "synthetic",
+        "business-routing",
+        "boundary"
+      ],
+      "input": {
+        "message": "The invoice might be wrong and our purchasing deadline is today. Please investigate the charge.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "billing_priority"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "technical_threshold_070",
+      "name": "Exactly baseline threshold",
+      "tags": [
+        "synthetic",
+        "business-routing",
+        "boundary"
+      ],
+      "input": {
+        "message": "The integration appears broken and is blocking our shipment. We have no alternative process.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "technical_priority"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "sales_threshold_080",
+      "name": "Exactly candidate threshold",
+      "tags": [
+        "synthetic",
+        "business-routing",
+        "boundary"
+      ],
+      "input": {
+        "message": "Could someone discuss the price for buying a larger plan?",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "sales_route"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "billing_below_070",
+      "name": "Just below baseline threshold",
+      "tags": [
+        "synthetic",
+        "business-routing",
+        "boundary"
+      ],
+      "input": {
+        "message": "I may have an invoice question, but I cannot tell which account it relates to.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "manual_review"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    },
+    {
+      "id": "technical_threshold_079",
+      "name": "Conservative review expected",
+      "tags": [
+        "synthetic",
+        "business-routing",
+        "boundary"
+      ],
+      "input": {
+        "message": "Our screen looks different. It might be broken, or a setting may have changed. We can still work.",
+        "accountTier": "standard"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "manual_review"
+        ],
+        "requiredNodes": [
+          "assess_request"
+        ],
+        "forbiddenNodes": [],
+        "assertions": []
+      }
+    }
+  ]
+}

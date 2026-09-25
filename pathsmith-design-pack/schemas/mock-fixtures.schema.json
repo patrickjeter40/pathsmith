@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pathsmith:mock-fixtures:0.1",
+  "title": "Pathsmith exact-request mock fixtures 0.1",
+  "type": "object",
+  "properties": {
+    "formatVersion": {
+      "const": "0.1"
+    },
+    "origin": {
+      "const": "synthetic"
+    },
+    "description": {
+      "type": "string"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "scenarioId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+          },
+          "binding": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+          },
+          "request": {
+            "type": "object",
+            "properties": {
+              "providerId": {
+                "const": "mock"
+              },
+              "model": {
+                "const": "mock-v1"
+              },
+              "state": {
+                "$ref": "#/$defs/jsonValue"
+              },
+              "questions": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/question"
+                }
+              }
+            },
+            "required": [
+              "providerId",
+              "model",
+              "state",
+              "questions"
+            ],
+            "additionalProperties": false
+          },
+          "response": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "const": "mock-v1"
+              },
+              "answers": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/answer"
+                }
+              },
+              "usage": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "model",
+              "answers",
+              "usage"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "scenarioId",
+          "nodeId",
+          "binding",
+          "request",
+          "response"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "formatVersion",
+    "origin",
+    "description",
+    "entries"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      ]
+    },
+    "question": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "choice"
+            },
+            "instructions": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "minProperties": 2,
+              "maxProperties": 255,
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "instructions",
+            "options"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "score"
+            },
+            "instructions": {
+              "type": "string",
+              "minLength": 1
+            },
+            "levels": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 10,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "instructions",
+            "levels"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "binary"
+            },
+            "instructions": {
+              "type": "string",
+              "minLength": 1
+            },
+            "trueCriteria": {
+              "type": "string",
+              "minLength": 1
+            },
+            "falseCriteria": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "instructions"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "answer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "choice"
+            },
+            "value": {
+              "type": "string"
+            },
+            "probabilities": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "probabilities",
+            "confidence"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "score"
+            },
+            "value": {
+              "type": "number",
+              "minimum": 0
+            },
+            "probabilities": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "probabilities",
+            "confidence"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "binary"
+            },
+            "probabilityTrue": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "kind",
+            "probabilityTrue"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.tooling/
+.pathsmith/
+.env
+.env.*
+!.env.example
+playwright-report/
+test-results/
+coverage/
+*.tsbuildinfo
+.lavish/

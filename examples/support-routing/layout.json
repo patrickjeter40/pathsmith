@@ -1,0 +1,58 @@
+{
+  "formatVersion": "0.1",
+  "workflowId": "support_routing",
+  "positions": {
+    "start": {
+      "x": 0,
+      "y": 0
+    },
+    "assess_request": {
+      "x": 0,
+      "y": 140
+    },
+    "confidence_gate": {
+      "x": 0,
+      "y": 300
+    },
+    "department_router": {
+      "x": 0,
+      "y": 460
+    },
+    "billing_priority": {
+      "x": -320,
+      "y": 650
+    },
+    "technical_context": {
+      "x": 0,
+      "y": 650
+    },
+    "technical_priority": {
+      "x": 0,
+      "y": 820
+    },
+    "out_manual": {
+      "x": 460,
+      "y": 460
+    },
+    "out_sales": {
+      "x": 300,
+      "y": 650
+    },
+    "out_billing_priority": {
+      "x": -480,
+      "y": 1000
+    },
+    "out_billing_standard": {
+      "x": -270,
+      "y": 1000
+    },
+    "out_technical_priority": {
+      "x": -40,
+      "y": 1000
+    },
+    "out_technical_standard": {
+      "x": 180,
+      "y": 1000
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "pathsmith",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "generate:check": "node scripts/generate.mjs --check",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "pnpm generate:check && node --test tests/*.test.mjs",
+    "test:e2e": "playwright test",
+    "test:parity": "node examples/standalone/dist/index.js",
+    "db:migrate": "node scripts/migrate.mjs",
+    "dev": "pnpm build && node scripts/dev.mjs",
+    "pathsmith": "node packages/cli/dist/index.js",
+    "demo": "node scripts/demo.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@pathsmith/contracts": "workspace:*",
+    "@pathsmith/core": "workspace:*",
+    "@pathsmith/evaluation": "workspace:*",
+    "@pathsmith/provider-mock": "workspace:*",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.6",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
+    "json-schema-to-typescript": "16.0.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.1"
+  }
+}
