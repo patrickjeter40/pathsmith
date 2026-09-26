@@ -22,7 +22,8 @@ body {
 }
 button,
 select,
-textarea {
+textarea,
+input {
   font: inherit;
 }
 button,
@@ -47,6 +48,7 @@ button:focus-visible,
 a:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
+input:focus-visible,
 .button:focus-within {
   outline: 2px solid #85dac4;
   outline-offset: 3px;
@@ -302,6 +304,23 @@ select {
   overflow-wrap: anywhere;
   color: #acc4d4;
 }
+.inspector label { display: grid; gap: 5px; margin: 12px 0; font-size: 12px; color: #a9bfca; }
+.inspector input, .inspector textarea, .inspector select { width: 100%; min-width: 0; max-width: 100%; border: 1px solid #344251; border-radius: 5px; background: #101922; color: #dce4ed; padding: 7px; }
+.inspector textarea { min-height: 92px; resize: vertical; font: 11px/1.5 ui-monospace, Consolas, monospace; }
+.inspector fieldset { border: 1px solid #354557; margin: 12px 0; padding: 10px; min-width: 0; }
+.inspector legend { color: #b5d8ca; font-size: 11px; padding: 0 5px; }
+.inspector details { margin: 12px 0; }
+.inspector details pre { max-height: 200px; overflow: auto; }
+.inspector .row { align-items: end; }
+.inspector .row label { flex: 1; }
+.inspector .row button { margin-bottom: 12px; }
+.editor-feedback { color: #f4bf96 !important; margin: 10px 0 !important; }
+.danger { color: #f4b5a7; border-color: #8b5653; margin: 12px 0; }
+.workflow-card.path-visited { border-color: #8bd5af; background: #203b34; }
+.workflow-card.path-unvisited { opacity: .55; }
+.react-flow__edge.path-visited .react-flow__edge-path { stroke: #8bd5af; stroke-width: 3; }
+.react-flow__edge.path-unvisited .react-flow__edge-path { stroke: #52616b; opacity: .55; }
+.coverage-count { display: block; color: #a5dbbf; font-size: 9px; margin-top: 4px; }
 .workflow-card {
   position: relative;
   min-width: 205px;
@@ -407,6 +426,25 @@ select {
 .load-more { display: block; margin-top: 10px; width: 100%; text-align: center; }
 .run-details { margin-top: 18px; border-top: 1px solid #344251; padding-top: 12px; min-width: 0; }
 .run-details pre, .trace pre { max-height: 370px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #101922; border: 1px solid #344251; border-radius: 5px; padding: 12px; font: 11px/1.5 ui-monospace, Consolas, monospace; }
+.historical-graph { margin-top: 20px; border-top: 1px solid #344251; padding-top: 10px; }
+.historical-graph .editor, .case-comparison .editor { display: block; min-height: 0; border: 1px solid #344251; }
+.historical-graph .canvas { height: 420px; }
+.case-comparison .canvas { height: 320px; }
+.historical-graph button[aria-pressed="true"] { border-color: #8cd1bb; background: #203730; }
+.comparison-controls { align-items: end; }
+.comparison-controls > label:not(.check) { flex: 1 1 260px; }
+.comparison-controls select { max-width: 100%; }
+.comparison-controls .check { display: flex; align-items: center; gap: 8px; }
+.comparison-report { margin-top: 22px; border-top: 1px solid #344251; padding-top: 12px; }
+.comparison-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.comparison-metrics span { padding: 12px; border: 1px solid #344251; border-radius: 5px; background: #101922; }
+.gate-fail { color: #f2a49a; }.gate-pass { color: #93d6b2; }.gate-inconclusive { color: #efc68a; }
+.comparison-cases { display: grid; gap: 6px; margin-top: 12px; max-height: 370px; overflow: auto; }
+.comparison-cases button { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(130px, 1fr) minmax(150px, 1fr); gap: 8px; text-align: left; }
+.diff-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; }
+.diff-grid > div { min-width: 0; }
+.diff-grid pre, .case-comparison pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 370px; overflow: auto; background: #101922; border: 1px solid #344251; padding: 10px; font: 11px/1.5 ui-monospace, Consolas, monospace; }
+.case-comparison { margin-top: 18px; }
 .diagnostics { color: #f5b488; font-size: 12px; }
 .next-step p {
   font-size: 12px;
@@ -501,4 +539,7 @@ select {
   .canvas {
     height: 450px;
   }
+  .diff-grid { grid-template-columns: minmax(0, 1fr); }
+  .comparison-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .comparison-cases button { grid-template-columns: minmax(0, 1fr); }
 }

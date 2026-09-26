@@ -1,0 +1,220 @@
+import { useMemo, useState } from "react";
+import {
+  Background, Controls, Handle, Position, ReactFlow,
+  type Connection, type Edge, type Node, type NodeProps,
+} from "@xyflow/react";
+import { requiredPorts, validateWorkflow, type Workflow, type WorkflowNode } from "@pathsmith/contracts";
+
+export type Layout = { formatVersion?: string; workflowId?: string; positions?: Record<string, { x: number; y: number }> };
+type Coverage = {
+  started: number; partial: boolean;
+  nodes: { nodeId: string; visits: number; startedScenarios: number }[];
+  edges: { edgeId: string; traversals: number; sourceVisits: number }[];
+};
+type Props = {
+  workflow: Workflow;
+  layout: Layout;
+  selectedNode: string;
+  onSelect: (id: string) => void;
+  onEdit?: (workflow: Workflow) => void;
+  onLayout?: (layout: Layout) => void;
+  selectedEdges?: string[];
+  visitedNodes?: string[];
+  coverage?: Coverage | null;
+};
+const pretty = (value: unknown) => JSON.stringify(value, null, 2);
+const unique = (existing: string[], base: string) => {
+  let id = base, index = 2;
+  while (existing.includes(id)) id = `${base}_${index++}`;
+  return id;
+};
+
+function Card({ data, selected }: NodeProps) {
+  const definition = data.definition as WorkflowNode;
+  const visited = data.visited as boolean | undefined;
+  const visits = data.visits as string | undefined;
+  return <div className={`workflow-card ${selected ? "selected" : ""} ${visited === true ? "path-visited" : visited === false ? "path-unvisited" : ""}`}>
+    <div className="kind">{definition.kind}</div><strong>{definition.label}</strong><code>{definition.id}</code>
+    {visits && <small className="coverage-count">{visits}</small>}
+    {definition.kind !== "start" && <Handle type="target" position={Position.Top} />}
+    <div className="ports">{requiredPorts(definition).map((port, index, ports) => <span key={port}>{port}<Handle id={port} type="source" position={Position.Bottom} style={{ left: `${((index + 1) * 100) / (ports.length + 1)}%` }} /></span>)}</div>
+  </div>;
+}
+const nodeTypes = { workflow: Card };
+
+function defaultPosition(workflow: Workflow, id: string) {
+  const seen = new Set<string>();
+  const levels = new Map<string, number>();
+  const walk = (current: string, depth: number) => {
+    if (seen.has(current) && (levels.get(current) ?? 0) >= depth) return;
+    if (depth > workflow.nodes.length) return;
+    seen.add(current); levels.set(current, depth);
+    workflow.edges.filter((edge) => edge.source === current).forEach((edge) => walk(edge.target, depth + 1));
+  };
+  const start = workflow.nodes.find((node) => node.kind === "start");
+  if (start) walk(start.id, 0);
+  const depth = levels.get(id) ?? workflow.nodes.length;
+  const peers = workflow.nodes.filter((node) => (levels.get(node.id) ?? workflow.nodes.length) === depth);
+  return { x: peers.findIndex((node) => node.id === id) * 270, y: depth * 175 };
+}
+
+function references(workflow: Workflow) {
+  const result: string[] = ["input", ...Object.keys(workflow.inputSchema.properties ?? {}).map((key) => `input.${key}`)];
+  for (const node of workflow.nodes) {
+    if (node.kind === "judgment") {
+      result.push(`outputs.${node.id}`);
+      for (const [key, question] of Object.entries(node.questions)) {
+        result.push(`outputs.${node.id}.${key}.value`);
+        if (question.kind === "choice") result.push(`outputs.${node.id}.${key}.confidence`);
+        if (question.kind === "binary") result.push(`outputs.${node.id}.${key}.probabilityTrue`);
+      }
+    } else if (node.kind === "transform") result.push(`outputs.${node.id}`);
+  }
+  return result;
+}
+
+export function WorkflowEditor({ workflow, layout, selectedNode, onSelect, onEdit, onLayout, selectedEdges, visitedNodes, coverage }: Props) {
+  const [feedback, setFeedback] = useState("");
+  const [newKind, setNewKind] = useState<WorkflowNode["kind"]>("branch");
+  const editable = !!onEdit;
+  const chosen = workflow.nodes.find((node) => node.id === selectedNode);
+  const refs = useMemo(() => references(workflow), [workflow]);
+  const graphNodes: Node[] = workflow.nodes.map((definition) => {
+    const count = coverage?.nodes.find((item) => item.nodeId === definition.id);
+    return { id: definition.id, type: "workflow", selected: definition.id === selectedNode,
+      position: layout.positions?.[definition.id] ?? defaultPosition(workflow, definition.id),
+      data: { definition, visited: visitedNodes ? visitedNodes.includes(definition.id) : coverage ? (count?.visits ?? 0) > 0 : undefined,
+        visits: count ? `${count.visits}/${count.startedScenarios} started` : undefined },
+    };
+  });
+  const graphEdges: Edge[] = workflow.edges.map((edge) => {
+    const count = coverage?.edges.find((item) => item.edgeId === edge.id);
+    const visited = selectedEdges ? selectedEdges.includes(edge.id) : coverage ? (count?.traversals ?? 0) > 0 : undefined;
+    return { id: edge.id, source: edge.source, sourceHandle: edge.port, target: edge.target, type: "smoothstep",
+      label: coverage && count ? `${edge.port}: ${count.traversals}/${count.sourceVisits || "N/A"} source visits` : edge.port === "next" ? "" : edge.port,
+      className: visited === true ? "path-visited" : visited === false ? "path-unvisited" : "",
+    };
+  });
+  function editNode(update: (node: WorkflowNode) => WorkflowNode) {
+    if (!chosen || !onEdit) return;
+    const next = structuredClone(workflow);
+    const index = next.nodes.findIndex((node) => node.id === chosen.id);
+    next.nodes[index] = update(next.nodes[index]);
+    onEdit(next);
+    setFeedback("");
+  }
+  function changeConnection(connection: Connection, oldId?: string) {
+    if (!onEdit || !connection.source || !connection.target || !connection.sourceHandle) return;
+    const source = workflow.nodes.find((node) => node.id === connection.source);
+    const target = workflow.nodes.find((node) => node.id === connection.target);
+    if (!source || !target || target.kind === "start" || source.id === target.id || !requiredPorts(source).includes(connection.sourceHandle)) {
+      setFeedback("Invalid connection: choose a source port and a different destination node."); return;
+    }
+    const next = structuredClone(workflow);
+    const existing = next.edges.find((edge) => edge.source === source.id && edge.port === connection.sourceHandle);
+    next.edges = next.edges.filter((edge) => edge.id !== oldId && !(edge.source === source.id && edge.port === connection.sourceHandle)) as Workflow["edges"];
+    next.edges.push({ id: existing?.id ?? unique(next.edges.map((edge) => edge.id), `e_${source.id}_${connection.sourceHandle}`), source: source.id, port: connection.sourceHandle, target: target.id });
+    const links = new Map<string, string[]>();
+    next.edges.forEach((edge) => links.set(edge.source, [...(links.get(edge.source) ?? []), edge.target]));
+    const reaches = (from: string, goal: string, seen = new Set<string>()): boolean => {
+      if (from === goal) return true;
+      if (seen.has(from)) return false;
+      seen.add(from);
+      return (links.get(from) ?? []).some((id) => reaches(id, goal, seen));
+    };
+    if (reaches(target.id, source.id)) { setFeedback("Invalid connection: cycles are not allowed."); return; }
+    const result = validateWorkflow(next);
+    if (result.diagnostics.some((item) => ["REFERENCE_NOT_DOMINATING", "INVALID_REFERENCE"].includes(item.code))) {
+      setFeedback(`Invalid connection: ${result.diagnostics.find((item) => item.code.includes("REFERENCE"))?.message}`); return;
+    }
+    onEdit(next); setFeedback("");
+  }
+  function addNode() {
+    if (!onEdit || newKind === "start") return;
+    const next = structuredClone(workflow);
+    const id = unique(next.nodes.map((node) => node.id), newKind);
+    const sample: WorkflowNode = newKind === "branch" ? { id, label: "New branch", kind: "branch", cases: [{ id: "case_1", when: { op: "literal", value: true } }] } :
+      newKind === "judgment" ? { id, label: "New judgment", kind: "judgment", binding: workflow.bindings[0] ?? "decisions", state: { op: "ref", path: ["input"] }, questions: { decision: { kind: "binary", instructions: "Describe the decision." } } } :
+      newKind === "transform" ? { id, label: "New transform", kind: "transform", value: { op: "ref", path: ["input"] } } :
+      { id, label: "New output", kind: "output", outcomeId: id, value: { op: "literal", value: null } };
+    next.nodes.push(sample); onEdit(next); onSelect(id);
+    onLayout?.({ ...layout, positions: { ...layout.positions, [id]: { x: workflow.nodes.length * 30, y: workflow.nodes.length * 110 } } });
+    setFeedback("Connect the new node through its named ports; the draft may be incomplete until then.");
+  }
+  function deleteNode() {
+    if (!chosen || !onEdit || chosen.kind === "start") return;
+    const next = structuredClone(workflow);
+    next.nodes = next.nodes.filter((node) => node.id !== chosen.id) as Workflow["nodes"];
+    next.edges = next.edges.filter((edge) => edge.source !== chosen.id && edge.target !== chosen.id) as Workflow["edges"];
+    onEdit(next); onSelect("");
+    const positions = { ...layout.positions }; delete positions[chosen.id]; onLayout?.({ ...layout, positions });
+  }
+  function setCase(index: number, field: "id" | "when", value: string) {
+    if (chosen?.kind !== "branch") return;
+    if (field === "when") {
+      try { const parsed = JSON.parse(value); editNode((node) => { if (node.kind !== "branch") return node; node.cases[index].when = parsed; return node; }); }
+      catch (error) { setFeedback(`Expression JSON was not applied: ${String(error)}`); }
+    } else {
+      if (!value.trim() || chosen.cases.some((item, i) => i !== index && item.id === value)) { setFeedback("Case port IDs must be unique and nonempty."); return; }
+      const old = chosen.cases[index].id;
+      const next = structuredClone(workflow);
+      const branch = next.nodes.find((node) => node.id === chosen.id);
+      if (branch?.kind !== "branch") return;
+      branch.cases[index].id = value;
+      next.edges.forEach((edge) => { if (edge.source === chosen.id && edge.port === old) edge.port = value; });
+      onEdit?.(next);
+    }
+  }
+  return <div className="editor">
+    <div className="canvas"><ReactFlow nodes={graphNodes} edges={graphEdges} nodeTypes={nodeTypes} nodesDraggable={editable} nodesConnectable={editable} edgesReconnectable={editable}
+      onNodeClick={(_, item) => onSelect(item.id)} onPaneClick={() => onSelect("")}
+      onConnect={changeConnection} onReconnect={(old, connection) => changeConnection(connection, old.id)}
+      onNodeDragStop={(_, item) => onLayout?.({ ...layout, positions: { ...layout.positions, [item.id]: item.position } })}
+      fitView minZoom={0.2} colorMode="dark"><Background gap={22} color="#28333d" /><Controls showInteractive={editable} /></ReactFlow></div>
+    {editable && <aside className="inspector">
+      <span className="eyebrow">NODE INSPECTOR</span>
+      <div className="row"><label>New node kind<select aria-label="New node kind" value={newKind} onChange={(event) => setNewKind(event.target.value as WorkflowNode["kind"])}><option value="judgment">Judgment</option><option value="transform">Transform</option><option value="branch">Branch</option><option value="output">Output</option></select></label><button onClick={addNode}>Add node</button></div>
+      {feedback && <p className="editor-feedback" role="alert">{feedback}</p>}
+      {chosen ? <>
+        <h2>{chosen.label}</h2><p><code>{chosen.id}</code> · {chosen.kind}</p>
+        <label>Node label<input aria-label="Node label" value={chosen.label} onChange={(event) => editNode((node) => ({ ...node, label: event.target.value }))} /></label>
+        {chosen.kind === "judgment" && <>
+          <label>Binding<select aria-label="Judgment binding" value={chosen.binding} onChange={(event) => editNode((node) => node.kind === "judgment" ? { ...node, binding: event.target.value } : node)}>{workflow.bindings.map((binding) => <option key={binding}>{binding}</option>)}</select></label>
+          <label>State reference<select aria-label="Judgment state reference" value={chosen.state.op === "ref" ? chosen.state.path.join(".") : ""} onChange={(event) => editNode((node) => node.kind === "judgment" ? { ...node, state: { op: "ref", path: event.target.value.split(".") as [string, ...string[]] } } : node)}><option value="">Advanced expression</option>{refs.map((ref) => <option key={ref} value={ref}>{ref}</option>)}</select></label>
+          <details><summary>State expression JSON</summary><textarea key={`${chosen.id}-state-${pretty(chosen.state)}`} aria-label="State expression JSON" defaultValue={pretty(chosen.state)} onBlur={(event) => { try { const value = JSON.parse(event.target.value); editNode((node) => node.kind === "judgment" ? { ...node, state: value } : node); } catch (error) { setFeedback(String(error)); } }} /></details>
+          {Object.entries(chosen.questions).map(([key, question]) => <fieldset key={key}><legend>{key} · {question.kind}</legend>
+            <label>Question instructions<textarea aria-label={`${key} instructions`} value={question.instructions} onChange={(event) => editNode((node) => { if (node.kind !== "judgment") return node; node.questions[key].instructions = event.target.value; return node; })} /></label>
+            {question.kind === "choice" && Object.entries(question.options).map(([option, description]) => <label key={option}>{option} description<input aria-label={`${key} ${option} description`} value={description} onChange={(event) => editNode((node) => { if (node.kind !== "judgment") return node; const q = node.questions[key]; if (q.kind === "choice") q.options[option] = event.target.value; return node; })} /></label>)}
+            {question.kind === "score" && question.levels.map((level, index) => <label key={index}>Level {index}<input aria-label={`${key} level ${index}`} value={level} onChange={(event) => editNode((node) => { if (node.kind !== "judgment") return node; const q = node.questions[key]; if (q.kind === "score") q.levels[index] = event.target.value; return node; })} /></label>)}
+            {question.kind === "binary" && <><label>True criteria<input aria-label={`${key} true criteria`} value={question.trueCriteria ?? ""} onChange={(event) => editNode((node) => { if (node.kind !== "judgment") return node; const q = node.questions[key]; if (q.kind === "binary") q.trueCriteria = event.target.value; return node; })} /></label><label>False criteria<input aria-label={`${key} false criteria`} value={question.falseCriteria ?? ""} onChange={(event) => editNode((node) => { if (node.kind !== "judgment") return node; const q = node.questions[key]; if (q.kind === "binary") q.falseCriteria = event.target.value; return node; })} /></label></>}
+          </fieldset>)}
+          <details><summary>Questions JSON (types and options)</summary><textarea key={`${chosen.id}-questions-${pretty(chosen.questions)}`} aria-label="Questions JSON" defaultValue={pretty(chosen.questions)} onBlur={(event) => { try { const value = JSON.parse(event.target.value); editNode((node) => node.kind === "judgment" ? { ...node, questions: value } : node); } catch (error) { setFeedback(String(error)); } }} /></details>
+        </>}
+        {chosen.kind === "branch" && <><p>Cases run top to bottom; first true wins. Later cases are not evaluated. Default is explicit.</p>
+          {chosen.cases.map((item, index) => {
+            const expr = item.when;
+            const simple = "left" in expr && "right" in expr && expr.left.op === "ref" && expr.right.op === "literal";
+            return <fieldset key={`${index}-${item.id}`}><legend>Case {index + 1}</legend>
+              <label>Port ID<input aria-label={`Case ${index + 1} port ID`} value={item.id} onChange={(event) => setCase(index, "id", event.target.value)} /></label>
+              {simple && "left" in expr && "right" in expr && expr.left.op === "ref" && expr.right.op === "literal" && <>
+                <label>Field reference<select aria-label={`Case ${index + 1} field reference`} value={expr.left.path.join(".")} onChange={(event) => editNode((node) => { if (node.kind !== "branch") return node; const current = node.cases[index].when; if ("left" in current) current.left = { op: "ref", path: event.target.value.split(".") as [string, ...string[]] }; return node; })}>{refs.map((ref) => <option key={ref}>{ref}</option>)}</select></label>
+                <label>Operator<select aria-label={`Case ${index + 1} operator`} value={expr.op} onChange={(event) => editNode((node) => { if (node.kind !== "branch") return node; const current = node.cases[index].when; if ("left" in current && "right" in current) node.cases[index].when = { ...current, op: event.target.value as typeof current.op }; return node; })}>{["eq", "ne", "gt", "gte", "lt", "lte", "in"].map((op) => <option key={op}>{op}</option>)}</select></label>
+                <label>Literal value<input aria-label={`Case ${index + 1} literal value`} value={String(expr.right.value)} onChange={(event) => editNode((node) => { if (node.kind !== "branch") return node; const current = node.cases[index].when; if ("right" in current) current.right = { op: "literal", value: /^-?(?:\d+\.?\d*|\.\d+)$/.test(event.target.value) ? Number(event.target.value) : event.target.value }; return node; })} /></label>
+              </>}
+              <label>Destination<select aria-label={`Case ${index + 1} destination`} value={workflow.edges.find((edge) => edge.source === chosen.id && edge.port === item.id)?.target ?? ""} onChange={(event) => changeConnection({ source: chosen.id, sourceHandle: item.id, target: event.target.value, targetHandle: null })}><option value="">Connect a node</option>{workflow.nodes.filter((node) => node.id !== chosen.id && node.kind !== "start").map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+              <div className="row"><button disabled={index === 0} onClick={() => editNode((node) => { if (node.kind !== "branch") return node; [node.cases[index - 1], node.cases[index]] = [node.cases[index], node.cases[index - 1]]; return node; })}>Move up</button><button disabled={index === chosen.cases.length - 1} onClick={() => editNode((node) => { if (node.kind !== "branch") return node; [node.cases[index], node.cases[index + 1]] = [node.cases[index + 1], node.cases[index]]; return node; })}>Move down</button><button disabled={chosen.cases.length === 1} onClick={() => { const next = structuredClone(workflow); const branch = next.nodes.find((node) => node.id === chosen.id); if (branch?.kind !== "branch") return; const [removed] = branch.cases.splice(index, 1); next.edges = next.edges.filter((edge) => !(edge.source === chosen.id && edge.port === removed.id)) as Workflow["edges"]; onEdit?.(next); }}>Remove case</button></div>
+              <details><summary>Advanced expression JSON</summary><textarea key={`${chosen.id}-${item.id}-${pretty(item.when)}`} aria-label={`Case ${index + 1} expression JSON`} defaultValue={pretty(item.when)} onBlur={(event) => setCase(index, "when", event.target.value)} /></details>
+            </fieldset>;
+          })}
+          <button onClick={() => editNode((node) => { if (node.kind !== "branch") return node; node.cases.push({ id: unique(node.cases.map((item) => item.id), "case"), when: { op: "literal", value: true } }); return node; })}>Add branch case</button>
+          <label>Default destination<select aria-label="Default destination" value={workflow.edges.find((edge) => edge.source === chosen.id && edge.port === "default")?.target ?? ""} onChange={(event) => changeConnection({ source: chosen.id, sourceHandle: "default", target: event.target.value, targetHandle: null })}><option value="">Connect a node</option>{workflow.nodes.filter((node) => node.id !== chosen.id && node.kind !== "start").map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        </>}
+        {chosen.kind === "output" && <label>Outcome ID<input aria-label="Outcome ID" value={chosen.outcomeId} onChange={(event) => editNode((node) => node.kind === "output" ? { ...node, outcomeId: event.target.value } : node)} /></label>}
+        {(chosen.kind === "transform" || chosen.kind === "output") && <details><summary>Value expression JSON</summary><textarea key={`${chosen.id}-value-${pretty(chosen.value)}`} aria-label="Value expression JSON" defaultValue={pretty(chosen.value)} onBlur={(event) => { try { const value = JSON.parse(event.target.value); editNode((node) => node.kind === "transform" || node.kind === "output" ? { ...node, value } : node); } catch (error) { setFeedback(String(error)); } }} /></details>}
+        {chosen.kind !== "start" && chosen.kind !== "output" && chosen.kind !== "branch" && <label>Next destination<select aria-label="Next destination" value={workflow.edges.find((edge) => edge.source === chosen.id && edge.port === "next")?.target ?? ""} onChange={(event) => changeConnection({ source: chosen.id, sourceHandle: "next", target: event.target.value, targetHandle: null })}><option value="">Connect a node</option>{workflow.nodes.filter((node) => node.id !== chosen.id && node.kind !== "start").map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>}
+        <button className="danger" disabled={chosen.kind === "start"} onClick={deleteNode}>Delete node and connections</button>
+        <details><summary>Canonical node JSON</summary><pre>{pretty(chosen)}</pre></details>
+      </> : <p>Select a node to edit its canonical configuration. Drag nodes to arrange the canvas; layout stays separate from workflow semantics.</p>}
+    </aside>}
+  </div>;
+}

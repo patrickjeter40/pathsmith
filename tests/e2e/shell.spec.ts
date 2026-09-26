@@ -261,6 +261,9 @@ test("scenario edits publish as a new suite version and exact mock miss is visib
   await expect(page.locator(".trace pre")).toContainText(
     "MOCK_REQUEST_MISMATCH",
   );
+  await page.getByRole("button", { name: "Cohort coverage" }).click();
+  await expect(page.locator(".historical-graph")).toContainText("1 started");
+  await expect(page.locator(".historical-graph")).toContainText("Partial cohort");
   expect(errors).toEqual([]);
 });
 
@@ -311,4 +314,190 @@ test("small viewport keeps controls usable", async ({ page }) => {
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+});
+
+test("branch threshold edit compares two regressions and one improvement", async ({ page }) => {
+  const errors = await openIsolated(page);
+  await page.getByLabel("Example to load").selectOption("support-baseline");
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await page.getByRole("button", { name: "Run full suite" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  await expect(page.getByLabel("Baseline run").locator("option").nth(1)).toContainText("Support request routing");
+  const baselineId = await page.getByLabel("Baseline run").locator("option").nth(1).getAttribute("value");
+  await page.locator(".react-flow__node", { hasText: "confidence_gate" }).first().click();
+  await expect(page.getByLabel("Case 1 literal value")).toHaveValue("0.7");
+  await page.getByLabel("Case 1 literal value").fill("0.8");
+  await page.getByRole("button", { name: "Save workflow draft" }).click();
+  await expect(page.getByText(/Workflow draft saved at revision/)).toBeVisible();
+  await page.getByRole("button", { name: "Publish workflow" }).click();
+  await expect(page.getByText(/Workflow version .* published/)).toBeVisible();
+  await page.getByRole("button", { name: "Run full suite" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  await expect(page.getByLabel("Candidate run").locator("option").nth(1)).toContainText("Support request routing");
+  const candidateId = await page.getByLabel("Candidate run").locator("option").nth(1).getAttribute("value");
+  expect(candidateId).not.toBe(baselineId);
+  await page.getByLabel("Baseline run").selectOption(baselineId!);
+  await page.getByLabel("Candidate run").selectOption(candidateId!);
+  await page.getByRole("button", { name: "Compare runs" }).click();
+  await expect(page.locator(".comparison-report h3").first()).toContainText("Gate: fail");
+  await expect(page.locator(".comparison-metrics")).toContainText("2 new assertion regressions");
+  await expect(page.locator(".comparison-metrics")).toContainText("1 assertion improvements");
+  await page.getByLabel("Comparison case filter").selectOption("regression");
+  await expect(page.locator(".comparison-cases button")).toHaveCount(2);
+  await page.locator(".comparison-cases button").first().click();
+  await expect(page.locator(".case-comparison")).toContainText("First observed divergence:");
+  await expect(page.locator(".case-comparison pre").first()).toContainText("scenarioId");
+  await page.getByLabel("Strict gate: any candidate assertion failure fails").check();
+  await expect(page.locator(".comparison-report")).toHaveCount(0);
+  await page.getByRole("button", { name: "Compare runs" }).click();
+  await expect(page.locator(".comparison-report")).toContainText(`Run IDs: ${baselineId} → ${candidateId} · Strict gate: true`);
+  let releaseResponse!: () => void;
+  let requestSeen!: () => void;
+  let responseFulfilled!: () => void;
+  const held = new Promise<void>((resolve) => { releaseResponse = resolve; });
+  const seen = new Promise<void>((resolve) => { requestSeen = resolve; });
+  const fulfilled = new Promise<void>((resolve) => { responseFulfilled = resolve; });
+  await page.route("**/api/v1/comparisons", async (route) => {
+    const source = new URL(route.request().url());
+    const response = await route.fetch({ url: `${apiUrl}${source.pathname}` });
+    requestSeen();
+    await held;
+    await route.fulfill({ response });
+    responseFulfilled();
+  });
+  await page.getByRole("button", { name: "Compare runs" }).click();
+  await seen;
+  await page.getByLabel("Strict gate: any candidate assertion failure fails").uncheck();
+  releaseResponse();
+  await fulfilled;
+  await expect(page.locator(".comparison-report")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("new graph nodes remain editable while incomplete and undo restores canonical JSON", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Add node" }).click();
+  await expect(page.locator(".react-flow__node")).toHaveCount(11);
+  await expect(page.getByRole("status").filter({ hasText: "problem" })).toBeVisible();
+  await page.getByRole("button", { name: "Undo edit" }).click();
+  await expect(page.locator(".react-flow__node")).toHaveCount(10);
+  await page.getByRole("button", { name: "Redo edit" }).click();
+  await expect(page.locator(".react-flow__node")).toHaveCount(11);
+  await page.getByRole("button", { name: "JSON definition" }).click();
+  const json = JSON.parse(await page.getByLabel("Workflow JSON", { exact: true }).inputValue());
+  expect(json.nodes.some((node: { id: string }) => node.id === "branch")).toBe(true);
+});
+
+test("malformed nested workflow JSON stays editable and cannot be exported", async ({ page }) => {
+  const errors = await openIsolated(page);
+  await page.getByRole("button", { name: "JSON definition" }).click();
+  const editor = page.getByLabel("Workflow JSON", { exact: true });
+  const original = JSON.parse(await editor.inputValue());
+  const malformed = structuredClone(original);
+  const branch = malformed.nodes.find((node: { kind: string }) => node.kind === "branch");
+  branch.cases[0].when = null;
+  const judgment = malformed.nodes.find((node: { kind: string }) => node.kind === "judgment");
+  judgment.questions[Object.keys(judgment.questions)[0]].instructions = null;
+  await editor.fill(JSON.stringify(malformed));
+  await expect(page.getByRole("button", { name: "Export workflow" })).toBeDisabled();
+  await page.getByRole("button", { name: "Graph editor" }).click();
+  await expect(page.getByRole("button", { name: "Open JSON definition" })).toBeVisible();
+  await page.getByRole("button", { name: "Open JSON definition" }).click();
+  await expect(editor).toHaveValue(JSON.stringify(malformed));
+  await editor.fill(JSON.stringify(original));
+  await page.getByRole("button", { name: "Graph editor" }).click();
+  await expect(page.locator(".react-flow__node")).toHaveCount(original.nodes.length);
+  expect(errors).toEqual([]);
+});
+
+test("branch case order and named port reconnection round-trip to JSON", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByLabel("Example to load").selectOption("support-baseline");
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await expect(page.locator(".react-flow__node", { hasText: "department_router" })).toBeVisible();
+  await page.locator(".react-flow__node", { hasText: "department_router" }).click();
+  const second = page.getByRole("group", { name: "Case 2" });
+  await second.getByRole("button", { name: "Move up" }).click();
+  await expect(page.getByLabel("Case 1 port ID")).toHaveValue("technical");
+  await page.getByLabel("Default destination").selectOption("assess_request");
+  await expect(page.getByRole("alert").filter({ hasText: "Invalid connection: cycles" })).toBeVisible();
+  await page.getByLabel("Default destination").selectOption("out_sales");
+  await expect(page.getByRole("alert").filter({ hasText: "Invalid connection: cycles" })).toHaveCount(0);
+  await page.getByRole("button", { name: "JSON definition" }).click();
+  const definition = JSON.parse(await page.getByLabel("Workflow JSON", { exact: true }).inputValue());
+  expect(definition.nodes.find((node: { id: string }) => node.id === "department_router").cases.map((item: { id: string }) => item.id)).toEqual(["technical", "billing", "sales"]);
+  expect(definition.edges.find((edge: { source: string; port: string }) => edge.source === "department_router" && edge.port === "default").target).toBe("out_sales");
+});
+
+test("late coverage response cannot replace a different historical run", async ({ page }) => {
+  const seeded = await seedMinimal(2, 1);
+  const full = await queueMinimal(seeded.workflowVersion.id, seeded.suiteVersion.id);
+  const single = await queueMinimal(seeded.workflowVersion.id, seeded.suiteVersion.id, true);
+  await expect.poll(async () => (await directApi<{ status: string }>(`/runs/${full.id}`)).status).toBe("completed");
+  await expect.poll(async () => (await directApi<{ status: string }>(`/runs/${single.id}`)).status).toBe("completed");
+  await openIsolated(page);
+  await page.getByLabel("Saved project").selectOption(seeded.project.id);
+  await expect(page.locator(".history button")).toHaveCount(2);
+  let release!: () => void;
+  let intercepted!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const seen = new Promise<void>((resolve) => { intercepted = resolve; });
+  let count = 0;
+  await page.route("**/api/v1/runs/*/coverage", async (route) => {
+    const source = new URL(route.request().url());
+    const response = await route.fetch({ url: `${apiUrl}${source.pathname}` });
+    if (++count === 1) { intercepted(); await gate; }
+    await route.fulfill({ response });
+  });
+  await page.locator(".history button").first().click();
+  await seen;
+  await page.locator(".history button").nth(1).click();
+  await page.getByRole("button", { name: "Cohort coverage" }).click();
+  await expect(page.locator(".historical-graph")).toContainText("2 started");
+  release();
+  await expect(page.locator(".historical-graph")).toContainText("2 started");
+});
+
+test("an unstarted case does not highlight the graph start node", async ({ page }) => {
+  const seeded = await seedMinimal(1, 1);
+  const run = await queueMinimal(seeded.workflowVersion.id, seeded.suiteVersion.id);
+  await expect.poll(async () => (await directApi<{ status: string }>(`/runs/${run.id}`)).status).toBe("completed");
+  await openIsolated(page);
+  // Replace only the browser's case summary to exercise the unstarted display state.
+  await page.route(`**/api/v1/runs/${run.id}/scenarios*`, async (route) => {
+    const source = new URL(route.request().url());
+    const response = await route.fetch({ url: `${apiUrl}${source.pathname}${source.search}` });
+    const pageData = await response.json() as { items: { result: { started: boolean; visitedNodes: string[]; selectedEdges: string[] } }[] };
+    await route.fulfill({ response, json: { ...pageData, items: pageData.items.map((item) => ({ ...item, result: { ...item.result, started: false, visitedNodes: [], selectedEdges: [] } })) } });
+  });
+  await page.getByLabel("Saved project").selectOption(seeded.project.id);
+  await page.locator(".history button").first().click();
+  await expect(page.locator(".case-results button")).toHaveCount(1);
+  await page.locator(".case-results button").first().click();
+  await expect(page.locator(".historical-graph")).toContainText("Case did not start; no path was observed");
+  await expect(page.locator(".historical-graph .react-flow__node", { hasText: "start" }).locator(".workflow-card")).toHaveClass(/path-unvisited/);
+});
+
+test("dragged layout persists without changing workflow semantic hash", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await expect(page.getByLabel("Saved project")).not.toHaveValue("");
+  const projectId = await page.getByLabel("Saved project").inputValue();
+  const [draft] = await directApi<{ id: string }[]>(`/projects/${projectId}/workflows`);
+  const versionsBefore = await directApi<{ workflowSemanticHash: string }[]>(`/workflows/${draft.id}/versions`);
+  const node = page.locator(".react-flow__node", { hasText: "start" }).first();
+  const box = await node.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + 50, box!.y + 30);
+  await page.mouse.down();
+  await page.mouse.move(box!.x + 120, box!.y + 90, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.getByRole("button", { name: "Save workflow draft" })).toBeEnabled();
+  await page.getByRole("button", { name: "Save workflow draft" }).click();
+  const saved = await directApi<{ layout: { positions: Record<string, { x: number; y: number }> } }>(`/workflows/${draft.id}`);
+  expect(saved.layout.positions.start).toBeDefined();
+  await page.getByRole("button", { name: "Publish workflow" }).click();
+  const versionsAfter = await directApi<{ workflowSemanticHash: string }[]>(`/workflows/${draft.id}/versions`);
+  expect(versionsAfter).toHaveLength(2);
+  expect(versionsAfter[0].workflowSemanticHash).toBe(versionsBefore[0].workflowSemanticHash);
 });

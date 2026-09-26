@@ -38,7 +38,7 @@ export class ApiController {
     return {
       service: "pathsmith",
       status: this.local.storageFailed ? "degraded" : "ready",
-      milestone: "M2",
+      milestone: "M3",
       database: {
         status: this.local.storageFailed ? "error" : "ready",
         schemaVersion: this.local.storage.schemaVersion,
@@ -292,6 +292,31 @@ export class ApiController {
         : {}),
     });
   }
+  @Post("comparisons") @HttpCode(200) compare(@Body() value: unknown) {
+    const body = envelope(
+      value,
+      ["baselineRunId", "candidateRunId", "policy"],
+      ["baselineRunId", "candidateRunId", "policy"],
+    );
+    const policy = envelope(
+      body.policy,
+      ["strict", "acceptMixedModel"],
+      ["strict", "acceptMixedModel"],
+    );
+    if (
+      typeof policy.strict !== "boolean" ||
+      typeof policy.acceptMixedModel !== "boolean"
+    )
+      badRequest("Comparison policy values must be booleans");
+    return this.local.compare(
+      identifier(body.baselineRunId),
+      identifier(body.candidateRunId),
+      {
+        strict: policy.strict as boolean,
+        acceptMixedModel: policy.acceptMixedModel as boolean,
+      },
+    );
+  }
   @Get("runs/:id") run(@Param("id") id: string) {
     return this.local.view(
       this.local.storage.getRun(this.local.context, identifier(id)),
@@ -299,6 +324,9 @@ export class ApiController {
   }
   @Get("runs/:id/snapshot") snapshot(@Param("id") id: string) {
     return this.local.snapshot(identifier(id));
+  }
+  @Get("runs/:id/coverage") coverage(@Param("id") id: string) {
+    return { coverage: this.local.coverage(identifier(id)) };
   }
   @Get("runs/:id/scenarios") scenarios(
     @Param("id") id: string,

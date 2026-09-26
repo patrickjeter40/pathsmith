@@ -2,7 +2,7 @@
 
 Build, test, trace, and compare probabilistic decision workflows.
 
-**Implemented: M0–M2.** The local app now saves drafts, publishes immutable workflow and suite versions, runs exact mocks, and retains results and traces across restarts. It is not the completed POC. The [design](PATHSMITH_DESIGN.md) remains the product contract. The supplied support-routing expectations remain unchanged.
+**Implemented: M0–M3.** The local app saves drafts, publishes immutable workflow and suite versions, runs exact mocks, retains results across restarts, edits canonical workflows on a graph, and compares saved runs. It is not the completed POC. The [design](PATHSMITH_DESIGN.md) remains the product contract. The supplied support-routing expectations remain unchanged.
 
 ## Use the same Codex workflow on another device
 
@@ -19,7 +19,7 @@ pnpm db:migrate
 pnpm dev
 ```
 
-Open **http://127.0.0.1:5173**. The Nest API health endpoint is **http://127.0.0.1:4310/api/v1/health**. Both bind to loopback. The browser previews the gaming workflow. Click **Load checked example** to create a saved project with the gaming workflow and suite, then run a case or the suite. Saved projects, versions, runs, and traces reopen after restart. The graph inspector shows configuration; the run section shows actual execution. Visual node editing and comparisons are later milestones.
+Open **http://127.0.0.1:5173**. The Nest API health endpoint is **http://127.0.0.1:4310/api/v1/health**. Both bind to loopback. The browser previews the gaming workflow. Click **Load checked example** to create a saved project with a published workflow and suite. Use the graph editor to edit nodes, branch cases, connections, and layout; save the draft and publish before running. Saved projects, versions, runs, traces, and comparisons reopen or recompute from immutable runs after restart.
 
 On the supplied Windows machine, Node 20 is the global runtime. An isolated Node 24.21.0 / pnpm 10.33.0 toolchain is already installed in ignored `.tooling/`. Use the wrapper without changing your global configuration:
 
@@ -40,8 +40,9 @@ Use `Ctrl+C` to stop the development processes. `.env` is optional; `pnpm dev` l
 ## Use the local app
 
 1. Load a checked gaming or support-routing example. This creates a project with published workflow and suite versions.
-2. Select a scenario, edit its input or expectations JSON, then save the suite draft and publish a new version. Workflow JSON follows the same save and publish cycle. A stale save reports a conflict and preserves local edits.
-3. Run a selected case or the full suite in mock mode. Polling shows progress; select a run and case to inspect its saved snapshot, assertions, and trace. Canceling stops new dispatch. A restart marks unfinished jobs interrupted and never resumes them automatically.
+2. Edit the workflow graph or canonical JSON, then save and publish a new workflow version. The graph supports node forms, named ports, ordered branch cases, undo/redo, validation, and separate layout positions. Invalid drafts remain editable but cannot be published or exported. Select a scenario to edit its input or expectations JSON; save and publish the suite separately. A stale save reports a conflict and preserves local edits.
+3. Run a selected case or the full suite in mock mode. Polling shows progress; select a run and case to inspect its immutable graph snapshot, selected path, observed coverage, assertions, and trace. Canceling stops new dispatch. A restart marks unfinished jobs interrupted and never resumes them automatically.
+4. In **Compare**, choose baseline and candidate run IDs and an explicit gate policy. The result shows paired cases, new regressions, improvements, first path divergence, workflow/configuration changes, and an inconclusive gate for incomplete or incompatible runs. For the checked support example, run the baseline, change the `confidence_gate` literal from `0.7` to `0.8`, publish, run the same suite, and compare: two new regressions and one improvement appear.
 
 Mock fixtures match exact requests. Changing scenario input or judgment questions without adding a matching fixture produces `MOCK_REQUEST_MISMATCH`, an execution error rather than a business outcome. Runs recommend routes only; they do not moderate content or create support tickets. Local data can contain scenario text and full mock exchanges and is not application-level encrypted.
 
@@ -92,8 +93,8 @@ Reports use compact JSON with a 64 MiB budget, separate from the 8 MiB suite/fix
 | `evaluation`                                 | Preflight of selected inputs, bounded suite concurrency, assertions, coverage, comparison gates                            |
 | `cli`                                        | Headless validate/run/compare and JSON report files                                                                        |
 | `storage`                                    | Embedded SQLite migrations, workspace-scoped repositories, revisioned drafts, immutable versions, jobs, results, traces   |
-| `apps/api`                                   | Loopback Nest API, checked-example catalog, mock job runner, progress, history, cancellation, local request controls      |
-| `apps/web`                                   | React workflow preview, saved projects and suites, mock runs, history, and trace inspection                                 |
+| `apps/api`                                   | Loopback Nest API, checked examples, mock jobs, history, coverage, comparisons, local request controls                    |
+| `apps/web`                                   | React graph/JSON authoring, saved projects and suites, run paths and coverage, comparison inspection                      |
 | `provider-replay`, `provider-jev`            | Explicitly deferred package boundaries for M4                                                                              |
 
 The standalone example imports **built package exports**, with no API, database, React, or private source aliases. Its 24 cases compare both definitions' outcomes and ordered paths against the supplied independent expectations. It demonstrates the intended production boundary; the packages remain private and are not published.
@@ -139,12 +140,12 @@ pnpm test:parity
 pnpm demo
 ```
 
-Tests are offline except for loopback API/browser requests. Browser tests use an installed Google Chrome (`channel: chrome`); installing Chrome is a one-time environment prerequisite, not a test-time download. They run against an isolated temporary M2 API and do not use the developer's local data. No test contacts Jev. `pnpm test` includes storage integration, API lifecycle, the 100-node / 1,000-scenario workload, and CLI exit-code tests.
+Tests are offline except for loopback API/browser requests. Browser tests use an installed Google Chrome (`channel: chrome`); installing Chrome is a one-time environment prerequisite, not a test-time download. They run against an isolated temporary API and do not use the developer's local data. No test contacts Jev. `pnpm test` includes storage integration, API lifecycle and comparisons, the 100-node / 1,000-scenario workload, and CLI exit-code tests.
 
 Use `pnpm generate` after an intentional schema change, and commit generated types with the schema. `pnpm generate:check` verifies drift and equality of shared question/expression contracts. Schemas and fixture files are not rewritten by formatting. `pnpm db:migrate` creates or advances the local SQLite schema, using `PATHSMITH_DATA_DIR` when set.
 
-See [M0–M1 evidence](docs/M0-M1-RESULTS.md), [M2 evidence](docs/M2-RESULTS.md), and the [initial](docs/decisions/001-implementation-contract.md) and [M2](docs/decisions/002-m2-local-persistence.md) decision notes.
+See [M0–M1 evidence](docs/M0-M1-RESULTS.md), [M2 evidence](docs/M2-RESULTS.md), [M3 evidence](docs/M3-RESULTS.md), and the [initial](docs/decisions/001-implementation-contract.md) and [M2](docs/decisions/002-m2-local-persistence.md) decision notes.
 
 ## Next milestone
 
-**M3:** Visual node/edge authoring, undo/redo, historical graph overlays, and comparison UI. **M4:** Strict recorded replay, Jev transport with observable retry/attempt budgets, live consent, and remaining POC acceptance tests. The CLI presently rejects live/replay mode; no requests or billable smoke tests were run. Nothing is deployed, licensed for publication, or published.
+**M4:** Strict recorded replay, Jev transport with observable retry/attempt budgets, live consent, and remaining POC acceptance tests. The CLI presently rejects live/replay mode; no requests or billable smoke tests were run. Nothing is deployed, licensed for publication, or published.

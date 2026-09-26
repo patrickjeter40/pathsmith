@@ -1,20 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Background,
-  Controls,
-  Handle,
-  Position,
-  ReactFlow,
-  type NodeProps,
-} from "@xyflow/react";
-import {
   parseJson,
-  requiredPorts,
   validateWorkflow,
   type Suite,
   type Workflow,
-  type WorkflowNode,
 } from "@pathsmith/contracts";
+import { WorkflowEditor, type Layout } from "./WorkflowEditor";
 import gaming from "../../../examples/gaming/workflow.json";
 import "@xyflow/react/dist/style.css";
 import "./style.css";
@@ -27,6 +18,7 @@ type Draft<T> = {
   definition: T;
   draftRevision: number;
   diagnostics: { code: string; message: string }[];
+  layout?: Layout;
 };
 type Version = { id: string; draftRevision: number; createdAt: string };
 type Example = { id: string; name: string; fixtureSetId: string };
@@ -65,6 +57,7 @@ type CaseRun = {
   id: string;
   scenarioId: string;
   result: {
+    started?: boolean;
     status: string;
     assertionStatus: string;
     result?: { outcomeId: string; value: unknown };
@@ -81,12 +74,38 @@ type CaseRun = {
 };
 type Snapshot = {
   workflow: Workflow;
+  layout: Layout;
   suite: Suite;
   selectedScenarioIds: string[];
   profile: unknown;
   mode: string;
   origin: string;
 };
+type ComparisonCase = {
+  scenarioId: string;
+  behaviorChanged: boolean;
+  newAssertionRegression: boolean;
+  assertionImprovement: boolean;
+  newExecutionRegression: boolean;
+  unchangedFailure: boolean;
+  firstDivergence: { index: number; baselineEdge: string | null; candidateEdge: string | null } | null;
+  baseline: { status: string; outcome: string | null; assertionStatus: string; assertions: unknown[]; selectedEdges: string[]; visitedNodes: string[] };
+  candidate: { status: string; outcome: string | null; assertionStatus: string; assertions: unknown[]; selectedEdges: string[]; visitedNodes: string[] };
+};
+type Comparison = {
+  gate: "pass" | "fail" | "inconclusive";
+  baselineRunId: string; candidateRunId: string;
+  policy: { strict: boolean; acceptMixedModel: boolean };
+  baselineStatus: string; candidateStatus: string;
+  issues: string[];
+  changedCases: number | null; newAssertionRegressions: number | null;
+  assertionImprovements: number | null; newExecutionRegressions: number | null;
+  modelChanged: boolean | null; workflowChanged: boolean; confounded: boolean | null;
+  workflowDiff: { nodes: { added: string[]; removed: string[]; changed: { id: string; before: unknown; after: unknown }[] }; edges: { added: string[]; removed: string[]; changed: { id: string; before: unknown; after: unknown }[] }; inputSchemaChanged: boolean; outputSchemaChanged: boolean; bindingsChanged: boolean };
+  configurationDiff: { key: string; before: unknown; after: unknown }[];
+  cases: ComparisonCase[];
+};
+type Coverage = { started: number; partial: boolean; nodes: { nodeId: string; visits: number; startedScenarios: number }[]; edges: { edgeId: string; traversals: number; sourceVisits: number }[]; branchPortsVisited: number; branchPortsTotal: number };
 
 async function api<T>(
   path: string,
@@ -113,34 +132,19 @@ async function api<T>(
 const pretty = (value: unknown) => JSON.stringify(value, null, 2);
 const finalStatus = (status: string) =>
   ["completed", "failed", "canceled", "interrupted"].includes(status);
-
-function WorkflowCard({ data, selected }: NodeProps) {
-  const node = data.definition as WorkflowNode;
-  return (
-    <div className={`workflow-card ${selected ? "selected" : ""}`}>
-      <div className="kind">{node.kind}</div>
-      <strong>{node.label}</strong>
-      <code>{node.id}</code>
-      {node.kind !== "start" && (
-        <Handle type="target" position={Position.Top} />
-      )}
-      <div className="ports">
-        {requiredPorts(node).map((port, index, ports) => (
-          <span key={port}>
-            {port}
-            <Handle
-              id={port}
-              type="source"
-              position={Position.Bottom}
-              style={{ left: `${((index + 1) * 100) / (ports.length + 1)}%` }}
-            />
-          </span>
-        ))}
-      </div>
-    </div>
-  );
+function graphable(value: unknown): value is Workflow {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  if (!Array.isArray(item.nodes) || !Array.isArray(item.edges) || !Array.isArray(item.bindings) || !item.inputSchema || typeof item.inputSchema !== "object") return false;
+  return item.nodes.every((raw) => {
+    if (!raw || typeof raw !== "object") return false;
+    const node = raw as Record<string, unknown>;
+    if (typeof node.id !== "string" || typeof node.label !== "string") return false;
+    if (node.kind === "branch") return Array.isArray(node.cases) && node.cases.every((entry: unknown) => !!entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).id === "string");
+    if (node.kind === "judgment") return !!node.questions && typeof node.questions === "object" && !Array.isArray(node.questions) && Object.values(node.questions).every((question) => !!question && typeof question === "object" && ["choice", "score", "binary"].includes(String((question as Record<string, unknown>).kind)));
+    return ["start", "transform", "output"].includes(String(node.kind));
+  }) && item.edges.every((raw) => !!raw && typeof raw === "object" && ["id", "source", "port", "target"].every((key) => typeof (raw as Record<string, unknown>)[key] === "string"));
 }
-const nodeTypes = { workflow: WorkflowCard };
 
 export default function App() {
   const [health, setHealth] = useState("Checking API…");
@@ -158,6 +162,10 @@ export default function App() {
   const [workflowVersionId, setWorkflowVersionId] = useState("");
   const [suiteVersionId, setSuiteVersionId] = useState("");
   const [text, setText] = useState(pretty(gaming));
+  const [layout, setLayout] = useState<Layout>({});
+  const [, setHistoryIndex] = useState(0);
+  const undoStack = useRef<{ text: string; layout: Layout }[]>([]);
+  const redoStack = useRef<{ text: string; layout: Layout }[]>([]);
   const [suiteText, setSuiteText] = useState("");
   const [view, setView] = useState<"graph" | "json">("graph");
   const [selectedNode, setSelectedNode] = useState("route_content");
@@ -166,6 +174,7 @@ export default function App() {
   const [conflict, setConflict] = useState("");
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [comparisonRuns, setComparisonRuns] = useState<Run[]>([]);
   const [runTotal, setRunTotal] = useState(0);
   const [run, setRun] = useState<Run | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -173,12 +182,25 @@ export default function App() {
   const [caseTotal, setCaseTotal] = useState(0);
   const [selectedCaseRun, setSelectedCaseRun] = useState("");
   const [trace, setTrace] = useState<unknown>(null);
+  const [coverage, setCoverage] = useState<Coverage | null>(null);
+  const [historyView, setHistoryView] = useState<"path" | "coverage">("path");
+  const [selectedHistoricalNode, setSelectedHistoricalNode] = useState("");
+  const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [baselineId, setBaselineId] = useState("");
+  const [candidateId, setCandidateId] = useState("");
+  const [strictGate, setStrictGate] = useState(false);
+  const [acceptMixedModel, setAcceptMixedModel] = useState(false);
+  const [comparisonFilter, setComparisonFilter] = useState("all");
+  const [selectedComparisonCase, setSelectedComparisonCase] = useState("");
+  const [comparisonSnapshots, setComparisonSnapshots] = useState<{ baseline: Snapshot; candidate: Snapshot } | null>(null);
+  const [comparisonTraces, setComparisonTraces] = useState<{ baseline: unknown; candidate: unknown } | null>(null);
   const projectSelection = useRef("");
   const projectRequest = useRef(0);
   const runSelection = useRef("");
   const runRequest = useRef(0);
   const traceSelection = useRef("");
   const traceRequest = useRef(0);
+  const compareRequest = useRef(0);
   const runPageCount = useRef(50);
   const casePageCount = useRef(100);
 
@@ -230,11 +252,14 @@ export default function App() {
     if (projectSelection.current !== id || projectRequest.current !== generation) return;
     setRuns(page.items);
     setRunTotal(page.total);
+    const all = await fetchPages<Run>("/runs", 1000);
+    if (projectSelection.current === id && projectRequest.current === generation) setComparisonRuns(all.items);
     if (selectId) await openRun(selectId);
   }
   async function openProject(id: string, knownFixture?: string) {
     projectSelection.current = id;
     const generation = ++projectRequest.current;
+    compareRequest.current++;
     runSelection.current = "";
     runRequest.current++;
     traceSelection.current = "";
@@ -262,15 +287,22 @@ export default function App() {
       setWorkflowDraft(fullW);
       setSuiteDraft(fullS);
       setText(pretty(fullW.definition));
+      setLayout(fullW.layout ?? {});
+      undoStack.current = []; redoStack.current = []; setHistoryIndex(0);
       setSuiteText(pretty(fullS.definition));
       setSelectedCase(fullS.definition.scenarios?.[0]?.id ?? "");
       setSelectedNode("");
       setView("graph");
-      setRun(null);
+    setRun(null);
       setSnapshot(null);
       setCaseRuns([]);
       setCaseTotal(0);
       setTrace(null);
+      setCoverage(null);
+      setSelectedHistoricalNode("");
+      setComparison(null);
+      setBaselineId(""); setCandidateId("");
+      setComparisonSnapshots(null); setComparisonTraces(null); setSelectedComparisonCase("");
       const selectedProject = projects.find((item) => item.id === id);
       const matchingExample = examples.find(
         (item) => item.name === selectedProject?.name,
@@ -307,7 +339,7 @@ export default function App() {
       const result = validateWorkflow(value);
       return {
         result,
-        workflow: result.valid ? (value as unknown as Workflow) : null,
+        workflow: !result.diagnostics.some((item) => item.code === "SCHEMA_INVALID" || item.code === "UNSUPPORTED_FORMAT") && graphable(value) ? value : null,
       };
     } catch (error) {
       return {
@@ -338,50 +370,28 @@ export default function App() {
   const suite = suiteParse.suite;
   const scenario = suite?.scenarios.find((item) => item.id === selectedCase);
   const workflowDirty =
-    !!workflowDraft && text !== pretty(workflowDraft.definition);
+    !!workflowDraft && (text !== pretty(workflowDraft.definition) || pretty(layout) !== pretty(workflowDraft.layout ?? {}));
   const suiteDirty =
     !!suiteDraft && suiteText !== pretty(suiteDraft.definition);
-  const depths = useMemo(() => {
-    const map = new Map<string, number>();
-    if (!workflow) return map;
-    const visit = (id: string, depth: number) => {
-      if (depth <= (map.get(id) ?? -1)) return;
-      map.set(id, depth);
-      workflow.edges
-        .filter((edge) => edge.source === id)
-        .forEach((edge) => visit(edge.target, depth + 1));
-    };
-    const start = workflow.nodes.find((node) => node.kind === "start");
-    if (start) visit(start.id, 0);
-    return map;
-  }, [workflow]);
-  const nodes = useMemo(() => {
-    const counts = new Map<number, number>();
-    return (
-      workflow?.nodes.map((node) => {
-        const depth = depths.get(node.id) ?? 0,
-          index = counts.get(depth) ?? 0;
-        counts.set(depth, index + 1);
-        return {
-          id: node.id,
-          type: "workflow",
-          selected: node.id === selectedNode,
-          data: { definition: node },
-          position: { x: index * 270, y: depth * 175 },
-        };
-      }) ?? []
-    );
-  }, [workflow, depths, selectedNode]);
-  const edges =
-    workflow?.edges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      sourceHandle: edge.port,
-      target: edge.target,
-      type: "smoothstep",
-      label: edge.port === "next" ? "" : edge.port,
-    })) ?? [];
-  const node = workflow?.nodes.find((item) => item.id === selectedNode);
+  function editDefinition(value: string) {
+    undoStack.current.push({ text, layout });
+    redoStack.current = [];
+    setText(value); setHistoryIndex((index) => index + 1);
+  }
+  function editLayout(value: Layout) {
+    undoStack.current.push({ text, layout });
+    redoStack.current = [];
+    setLayout(value); setHistoryIndex((index) => index + 1);
+  }
+  function travel(direction: "undo" | "redo") {
+    const source = direction === "undo" ? undoStack : redoStack;
+    const target = direction === "undo" ? redoStack : undoStack;
+    const previous = source.current.pop();
+    if (!previous) return;
+    target.current.push({ text, layout });
+    setText(previous.text); setLayout(previous.layout);
+    setHistoryIndex((index) => index + 1);
+  }
   async function saveWorkflow() {
     if (!workflowDraft) return;
     setMessage("");
@@ -391,10 +401,11 @@ export default function App() {
       const saved = await api<Draft<Workflow>>(
         `/workflows/${workflowDraft.id}/draft`,
         "PUT",
-        { expectedRevision: workflowDraft.draftRevision, definition },
+        { expectedRevision: workflowDraft.draftRevision, definition, layout },
       );
       setWorkflowDraft(saved);
       setText(pretty(saved.definition));
+      setLayout(saved.layout ?? layout);
       setMessage(`Workflow draft saved at revision ${saved.draftRevision}.`);
     } catch (error) {
       const detail = String(error);
@@ -508,22 +519,26 @@ export default function App() {
       traceSelection.current = "";
       traceRequest.current++;
       setSelectedCaseRun("");
+      setSelectedHistoricalNode("");
       setTrace(null);
       setCaseRuns([]);
       setCaseTotal(0);
       setSnapshot(null);
+      setCoverage(null);
     }
     try {
-      const [record, snap, cases] = await Promise.all([
+      const [record, snap, cases, observed] = await Promise.all([
         api<Run>(`/runs/${id}`),
         api<Snapshot>(`/runs/${id}/snapshot`),
         fetchPages<CaseRun>(`/runs/${id}/scenarios`, casePageCount.current),
+        api<{ coverage: Coverage | null }>(`/runs/${id}/coverage`).catch(() => ({ coverage: null })),
       ]);
       if (runRequest.current !== generation || runSelection.current !== id || projectRequest.current !== projectGeneration || projectSelection.current !== record.projectId) return;
       setRun(record);
       setSnapshot(snap);
       setCaseRuns(cases.items);
       setCaseTotal(cases.total);
+      setCoverage(observed.coverage);
     } catch (error) {
       if (runRequest.current === generation) setMessage(String(error));
     }
@@ -552,6 +567,7 @@ export default function App() {
     const generation = ++traceRequest.current;
     const selectedRun = runSelection.current;
     setSelectedCaseRun(id);
+    setSelectedHistoricalNode("");
     setTrace(null);
     try {
       const result = await api(`/scenario-runs/${id}/trace`);
@@ -559,6 +575,39 @@ export default function App() {
     } catch (error) {
       if (traceRequest.current === generation) setMessage(String(error));
     }
+  }
+  async function compare() {
+    if (!baselineId || !candidateId) return;
+    const generation = ++compareRequest.current;
+    setComparison(null); setComparisonSnapshots(null); setSelectedComparisonCase(""); setComparisonTraces(null);
+    try {
+      const result = await api<Comparison>("/comparisons", "POST", { baselineRunId: baselineId, candidateRunId: candidateId, policy: { strict: strictGate, acceptMixedModel } });
+      const [baseline, candidate] = await Promise.all([api<Snapshot>(`/runs/${baselineId}/snapshot`), api<Snapshot>(`/runs/${candidateId}/snapshot`)]);
+      if (compareRequest.current !== generation) return;
+      setComparison(result); setComparisonSnapshots({ baseline, candidate });
+      setMessage("");
+    } catch (error) { if (compareRequest.current === generation) setMessage(String(error)); }
+  }
+  function clearComparison() {
+    compareRequest.current++;
+    setComparison(null);
+    setComparisonSnapshots(null);
+    setSelectedComparisonCase("");
+    setComparisonTraces(null);
+  }
+  async function selectComparisonCase(id: string) {
+    if (!comparison) return;
+    setSelectedComparisonCase(id); setComparisonTraces(null);
+    const generation = ++compareRequest.current;
+    try {
+      const [a, b] = await Promise.all([
+        fetchPages<CaseRun>(`/runs/${comparison.baselineRunId}/scenarios`, 1000),
+        fetchPages<CaseRun>(`/runs/${comparison.candidateRunId}/scenarios`, 1000),
+      ]);
+      const ids = [a.items.find((item) => item.scenarioId === id)?.id, b.items.find((item) => item.scenarioId === id)?.id];
+      const [baseline, candidate] = await Promise.all(ids.map((caseId) => caseId ? api(`/scenario-runs/${caseId}/trace`) : Promise.resolve(null)));
+      if (compareRequest.current === generation) setComparisonTraces({ baseline, candidate });
+    } catch (error) { if (compareRequest.current === generation) setMessage(String(error)); }
   }
   async function loadMoreRuns() {
     if (!projectId) return;
@@ -596,7 +645,7 @@ export default function App() {
     }
   }
   function exportFile() {
-    if (!workflow) return;
+    if (!validation.result.valid || !workflow) return;
     const url = URL.createObjectURL(
       new Blob([pretty(workflow)], { type: "application/json" }),
     );
@@ -623,7 +672,7 @@ export default function App() {
         <div className="sidebar-footer">
           <span className="dot" />
           {health}
-          <p>M2 · local mock execution</p>
+          <p>M3 · visual authoring and comparisons</p>
         </div>
       </aside>
       <main>
@@ -716,9 +765,11 @@ export default function App() {
                   onChange={(event) => void importFile(event.target.files?.[0])}
                 />
               </label>
-              <button disabled={!workflow} onClick={exportFile}>
+              <button disabled={!validation.result.valid || !workflow} onClick={exportFile}>
                 Export workflow
               </button>
+              <button aria-label="Undo edit" disabled={undoStack.current.length === 0} onClick={() => travel("undo")}>Undo</button>
+              <button aria-label="Redo edit" disabled={redoStack.current.length === 0} onClick={() => travel("redo")}>Redo</button>
               {workflowDraft && (
                 <>
                   <button
@@ -742,7 +793,7 @@ export default function App() {
               aria-pressed={view === "graph"}
               onClick={() => setView("graph")}
             >
-              Graph preview
+              Graph editor
             </button>
             <button
               aria-pressed={view === "json"}
@@ -759,50 +810,9 @@ export default function App() {
                 : `! ${validation.result.diagnostics.length} problem(s)`}
             </span>
           </div>
-          <div className="editor">
-            <div className="canvas">
-              {view === "json" ? (
-                <textarea
-                  aria-label="Workflow JSON"
-                  spellCheck={false}
-                  value={text}
-                  onChange={(event) => setText(event.target.value)}
-                />
-              ) : workflow ? (
-                <ReactFlow
-                  key={workflow.id + workflowDraft?.id}
-                  nodes={nodes}
-                  edges={edges}
-                  nodeTypes={nodeTypes}
-                  nodesDraggable={false}
-                  nodesConnectable={false}
-                  edgesReconnectable={false}
-                  onNodeClick={(_, item) => setSelectedNode(item.id)}
-                  fitView
-                  minZoom={0.2}
-                  colorMode="dark"
-                >
-                  <Background gap={22} color="#28333d" />
-                  <Controls showInteractive={false} />
-                </ReactFlow>
-              ) : (
-                <div className="empty">
-                  <strong>Resolve definition errors</strong>
-                  <button onClick={() => setView("json")}>
-                    Open JSON definition
-                  </button>
-                </div>
-              )}
-            </div>
-            <aside className="inspector">
-              <span className="eyebrow">DEFINITION INSPECTOR</span>
-              <h2>{node?.label ?? "Select a node"}</h2>
-              <p>
-                Canonical configuration. Runs below use published snapshots.
-              </p>
-              {node && <pre>{pretty(node)}</pre>}
-            </aside>
-          </div>
+          {view === "json" ? <div className="editor"><div className="canvas"><textarea aria-label="Workflow JSON" spellCheck={false} value={text} onChange={(event) => editDefinition(event.target.value)} /></div><aside className="inspector"><span className="eyebrow">CANONICAL DEFINITION</span><p>JSON edits and graph edits update the same draft. Invalid JSON stays in this editor until corrected.</p></aside></div>
+            : workflow ? <WorkflowEditor workflow={workflow} layout={layout} selectedNode={selectedNode} onSelect={setSelectedNode} onEdit={(value) => editDefinition(pretty(value))} onLayout={editLayout} />
+            : <div className="empty"><strong>Resolve definition errors</strong><button onClick={() => setView("json")}>Open JSON definition</button></div>}
           <div className="problems">
             <strong>
               {validation.result.valid
@@ -1105,8 +1115,41 @@ export default function App() {
                   <pre>{trace ? pretty(trace) : "Loading trace…"}</pre>
                 </div>
               )}
+              {snapshot && <div className="historical-graph">
+                <div className="section-heading"><h3>Historical graph</h3><div className="row"><button aria-pressed={historyView === "path"} onClick={() => setHistoryView("path")}>Selected case path</button><button aria-pressed={historyView === "coverage"} onClick={() => setHistoryView("coverage")}>Cohort coverage</button></div></div>
+                <p className="hint">Workflow version {run.workflowVersionId.slice(0, 8)} · {snapshot.mode} · {snapshot.origin} · {historyView === "coverage" ? `${coverage?.started ?? "N/A"} started; ${coverage?.branchPortsVisited ?? "N/A"}/${coverage?.branchPortsTotal ?? "N/A"} branch ports visited` : selectedCaseRun ? caseRuns.find((item) => item.id === selectedCaseRun)?.result.started === false ? "Case did not start; no path was observed" : "Selected case path" : "Choose a case above"}. Unvisited in this cohort does not mean unreachable.</p>
+                {coverage?.partial && <p className="notice conflict">Partial cohort: coverage counts include only saved case results.</p>}
+                {historyView === "coverage" && !coverage && <p className="hint">Coverage N/A: no saved case results are available.</p>}
+                <WorkflowEditor workflow={snapshot.workflow} layout={snapshot.layout ?? {}} selectedNode={selectedHistoricalNode} onSelect={setSelectedHistoricalNode}
+                  selectedEdges={historyView === "path" && selectedCaseRun ? caseRuns.find((item) => item.id === selectedCaseRun)?.result.selectedEdges : undefined}
+                  visitedNodes={historyView === "path" && selectedCaseRun ? caseRuns.find((item) => item.id === selectedCaseRun)?.result.visitedNodes : undefined}
+                  coverage={historyView === "coverage" ? coverage : null} />
+                {selectedHistoricalNode && <div className="trace"><h4>{snapshot.workflow.nodes.find((item) => item.id === selectedHistoricalNode)?.label ?? selectedHistoricalNode} · saved trace events</h4><pre>{trace ? pretty((trace as { events?: { nodeId?: string }[] }).events?.filter((item) => item.nodeId === selectedHistoricalNode) ?? []) : "Choose a case above to load trace events."}</pre></div>}
+              </div>}
             </div>
           )}
+        </section>
+        <section className="m2-panel" id="comparisons">
+          <div className="section-heading"><div><span className="eyebrow">IMMUTABLE RUNS</span><h2>Compare baseline and candidate</h2></div></div>
+          <p className="hint">Choose completed runs with the same suite snapshot and selected case IDs. The gate is inconclusive for incomplete or incompatible pairs.</p>
+          <div className="row comparison-controls">
+            <label>Baseline run<select aria-label="Baseline run" value={baselineId} onChange={(event) => { clearComparison(); setBaselineId(event.target.value); }}><option value="">Select baseline</option>{comparisonRuns.map((item) => <option key={item.id} value={item.id}>{item.workflowName} · {item.status} · {item.id.slice(0, 8)} · {new Date(item.createdAt).toLocaleString()}</option>)}</select></label>
+            <label>Candidate run<select aria-label="Candidate run" value={candidateId} onChange={(event) => { clearComparison(); setCandidateId(event.target.value); }}><option value="">Select candidate</option>{comparisonRuns.map((item) => <option key={item.id} value={item.id}>{item.workflowName} · {item.status} · {item.id.slice(0, 8)} · {new Date(item.createdAt).toLocaleString()}</option>)}</select></label>
+            <label className="check"><input type="checkbox" checked={strictGate} onChange={(event) => { clearComparison(); setStrictGate(event.target.checked); }} /> Strict gate: any candidate assertion failure fails</label>
+            <label className="check"><input type="checkbox" checked={acceptMixedModel} onChange={(event) => { clearComparison(); setAcceptMixedModel(event.target.checked); }} /> Accept mixed model provenance</label>
+            <button disabled={!baselineId || !candidateId || baselineId === candidateId} onClick={() => void compare()}>Compare runs</button>
+          </div>
+          {comparison && <div className="comparison-report">
+            <div className="section-heading"><h3>Gate: <strong className={`gate-${comparison.gate}`}>{comparison.gate}</strong></h3><span className="hint">Baseline {comparison.baselineStatus} · Candidate {comparison.candidateStatus}</span></div>
+            <p className="hint">Run IDs: {comparison.baselineRunId} → {comparison.candidateRunId} · Strict gate: {String(comparison.policy.strict)} · Accept mixed model: {String(comparison.policy.acceptMixedModel)}</p>
+            <div className="comparison-metrics"><span>{comparison.newAssertionRegressions ?? "N/A"} new assertion regressions</span><span>{comparison.assertionImprovements ?? "N/A"} assertion improvements</span><span>{comparison.changedCases ?? "N/A"} changed behavior</span><span>{comparison.newExecutionRegressions ?? "N/A"} new execution regressions</span></div>
+            {comparison.issues.length > 0 && <div className="notice conflict"><strong>Gate reasons</strong><ul>{comparison.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
+            <p className="hint">Workflow changed: {String(comparison.workflowChanged)} · Model changed: {comparison.modelChanged === null ? "N/A" : String(comparison.modelChanged)} · Confounded: {comparison.confounded === null ? "N/A" : String(comparison.confounded)}. Improvements do not cancel regressions.</p>
+            <details><summary>Workflow and configuration diff</summary><div className="diff-grid"><div><h4>Nodes</h4><p>Added: {comparison.workflowDiff.nodes.added.join(", ") || "none"}</p><p>Removed: {comparison.workflowDiff.nodes.removed.join(", ") || "none"}</p>{comparison.workflowDiff.nodes.changed.map((item) => <details key={item.id}><summary>Changed {item.id}</summary><div className="diff-grid"><pre>Before\n{pretty(item.before)}</pre><pre>After\n{pretty(item.after)}</pre></div></details>)}</div><div><h4>Edges and schema</h4><p>Added edges: {comparison.workflowDiff.edges.added.join(", ") || "none"}</p><p>Removed edges: {comparison.workflowDiff.edges.removed.join(", ") || "none"}</p><p>Changed edges: {comparison.workflowDiff.edges.changed.map((item) => item.id).join(", ") || "none"}</p><p>Input schema: {comparison.workflowDiff.inputSchemaChanged ? "changed" : "same"} · Output schema: {comparison.workflowDiff.outputSchemaChanged ? "changed" : "same"} · Bindings: {comparison.workflowDiff.bindingsChanged ? "changed" : "same"}</p><h4>Execution configuration</h4>{comparison.configurationDiff.length ? comparison.configurationDiff.map((item) => <details key={item.key}><summary>{item.key}</summary><div className="diff-grid"><pre>Before\n{pretty(item.before)}</pre><pre>After\n{pretty(item.after)}</pre></div></details>) : <p>No configuration changes.</p>}</div></div></details>
+            <div className="row"><label>Case filter<select aria-label="Comparison case filter" value={comparisonFilter} onChange={(event) => setComparisonFilter(event.target.value)}><option value="all">All paired cases</option><option value="regression">New assertion regressions</option><option value="improvement">Improvements</option><option value="change">Changed behavior</option><option value="error">Execution regressions</option></select></label></div>
+            <div className="comparison-cases">{comparison.cases.filter((item) => comparisonFilter === "all" || comparisonFilter === "regression" && item.newAssertionRegression || comparisonFilter === "improvement" && item.assertionImprovement || comparisonFilter === "change" && item.behaviorChanged || comparisonFilter === "error" && item.newExecutionRegression).map((item) => <button key={item.scenarioId} className={selectedComparisonCase === item.scenarioId ? "selected-run" : ""} onClick={() => void selectComparisonCase(item.scenarioId)}><strong>{item.scenarioId}</strong><span>{item.newAssertionRegression ? "Regression" : item.assertionImprovement ? "Improvement" : item.newExecutionRegression ? "Execution regression" : item.unchangedFailure ? "Unchanged failure" : item.behaviorChanged ? "Behavior changed" : "No change"}</span><span>{item.baseline.outcome ?? "N/A"} → {item.candidate.outcome ?? "N/A"}</span></button>)}</div>
+            {selectedComparisonCase && comparisonSnapshots && (() => { const item = comparison.cases.find((entry) => entry.scenarioId === selectedComparisonCase); if (!item) return null; return <div className="case-comparison"><h3>{item.scenarioId}</h3><p>First observed divergence: {item.firstDivergence ? `edge ${item.firstDivergence.index + 1}: ${item.firstDivergence.baselineEdge ?? "end"} → ${item.firstDivergence.candidateEdge ?? "end"}` : "none in selected edges"}</p><div className="diff-grid"><div><h4>Baseline · {item.baseline.assertionStatus}</h4><p>{item.baseline.status} · {item.baseline.outcome ?? "N/A"}</p><WorkflowEditor workflow={comparisonSnapshots.baseline.workflow} layout={comparisonSnapshots.baseline.layout ?? {}} selectedNode="" onSelect={() => {}} selectedEdges={item.baseline.selectedEdges} visitedNodes={item.baseline.visitedNodes} /><pre>{comparisonTraces ? pretty(comparisonTraces.baseline) : "Loading baseline trace…"}</pre></div><div><h4>Candidate · {item.candidate.assertionStatus}</h4><p>{item.candidate.status} · {item.candidate.outcome ?? "N/A"}</p><WorkflowEditor workflow={comparisonSnapshots.candidate.workflow} layout={comparisonSnapshots.candidate.layout ?? {}} selectedNode="" onSelect={() => {}} selectedEdges={item.candidate.selectedEdges} visitedNodes={item.candidate.visitedNodes} /><pre>{comparisonTraces ? pretty(comparisonTraces.candidate) : "Loading candidate trace…"}</pre></div></div></div>; })()}
+          </div>}
         </section>
       </main>
     </div>

@@ -8,11 +8,15 @@ import {
 } from "@pathsmith/contracts";
 import {
   assertValid,
+  canonicalize,
   PathsmithError,
   toExecutionError,
   type ExecutionLimits,
 } from "@pathsmith/core";
 import {
+  compareRuns,
+  coverage,
+  workflowDiff,
   runSuite,
   summarize,
   type ScenarioResult,
@@ -239,10 +243,110 @@ export class LocalApplication implements OnModuleDestroy {
     const page = this.storage.listRuns(this.context, options);
     return { ...page, items: page.items.map((run) => this.view(run)) };
   }
+  compare(
+    baselineId: string,
+    candidateId: string,
+    policy: { strict: boolean; acceptMixedModel: boolean },
+  ) {
+    // Look up both IDs in server-owned context. Different projects are allowed;
+    // cohort compatibility is decided by the shared comparison implementation.
+    const baseline = this.storage.getRun(this.context, baselineId);
+    const candidate = this.storage.getRun(this.context, candidateId);
+    const configuration = (run: RunRecord) => ({
+      profile: run.snapshot.profile,
+      limits: run.snapshot.limits,
+      concurrency: run.snapshot.concurrency,
+      mode: run.snapshot.mode,
+      origin: run.snapshot.origin,
+      runtimeVersion: run.snapshot.runtimeVersion,
+      adapters: run.report?.adapters ?? run.snapshot.adapters,
+    });
+    const before = configuration(baseline),
+      after = configuration(candidate);
+    const configurationDiff = (Object.keys(before) as (keyof typeof before)[])
+      .filter((key) => canonicalize(before[key]) !== canonicalize(after[key]))
+      .map((key) => ({ key, before: before[key], after: after[key] }));
+    const metadata = {
+      baselineStatus: baseline.status,
+      candidateStatus: candidate.status,
+      configurationDiff,
+    };
+    if (!baseline.report || !candidate.report) {
+      // No final report means no complete comparison cohort. Do not synthesize
+      // execution results or advertise zero regressions for unavailable pairs.
+      return {
+        formatVersion: "0.1",
+        artifactType: "pathsmith_comparison",
+        baselineRunId: baseline.id,
+        candidateRunId: candidate.id,
+        suiteSnapshotHash: baseline.snapshot.suiteSnapshotHash,
+        selectedScenarioIds: [...baseline.snapshot.selectedScenarioIds].sort(),
+        gate: "inconclusive",
+        policy,
+        issues: [baseline, candidate].flatMap((run, i) =>
+          run.report
+            ? []
+            : [
+                `${i === 0 ? "Baseline" : "Candidate"} run has no final report (${run.status})`,
+              ],
+        ),
+        changedCases: null,
+        newAssertionRegressions: null,
+        assertionImprovements: null,
+        newExecutionRegressions: null,
+        modelChanged: null,
+        workflowChanged:
+          baseline.snapshot.workflowSemanticHash !==
+          candidate.snapshot.workflowSemanticHash,
+        confounded: null,
+        workflowDiff: workflowDiff(
+          baseline.snapshot.workflow,
+          candidate.snapshot.workflow,
+        ),
+        cases: [],
+        ...metadata,
+      };
+    }
+    const comparison = compareRuns(baseline.report, candidate.report, policy);
+    return {
+      ...comparison,
+      ...metadata,
+      cases: comparison.cases.map((item) => ({
+        ...item,
+        baseline: {
+          ...item.baseline,
+          selectedEdges: baseline.report!.scenarios.find(
+            (s) => s.scenarioId === item.scenarioId,
+          )!.selectedEdges,
+          visitedNodes: baseline.report!.scenarios.find(
+            (s) => s.scenarioId === item.scenarioId,
+          )!.visitedNodes,
+        },
+        candidate: {
+          ...item.candidate,
+          selectedEdges: candidate.report!.scenarios.find(
+            (s) => s.scenarioId === item.scenarioId,
+          )!.selectedEdges,
+          visitedNodes: candidate.report!.scenarios.find(
+            (s) => s.scenarioId === item.scenarioId,
+          )!.visitedNodes,
+        },
+      })),
+    };
+  }
   snapshot(id: string) {
     const run = this.storage.getRun(this.context, id);
     const { fixtures: _fixtures, ...snapshot } = run.snapshot;
     return { ...snapshot, adapters: run.report?.adapters ?? snapshot.adapters };
+  }
+  coverage(id: string) {
+    const run = this.storage.getRun(this.context, id);
+    if (run.report) return run.report.coverage;
+    const results = this.allScenarios(id).map((item) => item.result);
+    if (!results.length) return null;
+    // Saved results are only the observed part of an unfinished run. Even if
+    // every saved case completed, absent cases cannot establish full coverage.
+    return { ...coverage(run.snapshot.workflow, results), partial: true };
   }
   scenarios(
     id: string,
