@@ -13,7 +13,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
-    "test": "pnpm generate:check && node --test tests/*.test.mjs",
+    "test": "pnpm generate:check && node --test tests/*.test.mjs && pnpm --filter @pathsmith/storage test",
     "test:e2e": "playwright test",
     "test:parity": "node examples/standalone/dist/index.js",
     "db:migrate": "node scripts/migrate.mjs",

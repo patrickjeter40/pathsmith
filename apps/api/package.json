@@ -12,6 +12,11 @@
     "@nestjs/common": "12.1.0",
     "@nestjs/core": "12.1.0",
     "@nestjs/platform-express": "12.1.0",
+    "@pathsmith/contracts": "workspace:*",
+    "@pathsmith/core": "workspace:*",
+    "@pathsmith/evaluation": "workspace:*",
+    "@pathsmith/provider-mock": "workspace:*",
+    "@pathsmith/storage": "workspace:*",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2"
   },

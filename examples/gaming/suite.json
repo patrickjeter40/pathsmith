@@ -1,0 +1,1515 @@
+{
+  "formatVersion": "0.1",
+  "id": "gaming_content_scenarios",
+  "name": "Gaming content synthetic scenarios",
+  "description": "Authored policy expectations for four channels and ordered threshold routes; these are not observed production labels.",
+  "scenarios": [
+    {
+      "id": "chat_abuse",
+      "name": "chat abuse",
+      "tags": [
+        "synthetic",
+        "in_game_chat"
+      ],
+      "input": {
+        "channel": "in_game_chat",
+        "content": "You are worthless. I will keep harassing you every match."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "risk_review"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_risk_review"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "trust_safety"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": true
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "abuse"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.92
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.92
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.15
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.1
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.5
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.4
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "report_suspicious_boundary",
+      "name": "report suspicious boundary",
+      "tags": [
+        "synthetic",
+        "player_report",
+        "policy_edge"
+      ],
+      "input": {
+        "channel": "player_report",
+        "content": "I saw a player selling stolen accounts in match chat, with a specific link."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "risk_review"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_risk_review"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "trust_safety"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": true
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "suspicious"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.88
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.08
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.8
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.2
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.8
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "support_abuse_precedence",
+      "name": "support abuse precedence",
+      "tags": [
+        "synthetic",
+        "support_conversation",
+        "policy_edge"
+      ],
+      "input": {
+        "channel": "support_conversation",
+        "content": "Help me log in, you useless idiots. Fix this now."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "risk_review"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_risk_review"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "trust_safety"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": true
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "support"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.91
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.85
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.05
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.2
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.65
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.6
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "support_login",
+      "name": "support login",
+      "tags": [
+        "synthetic",
+        "support_conversation"
+      ],
+      "input": {
+        "channel": "support_conversation",
+        "content": "I cannot sign in after the update; can someone help recover my account?"
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "player_support"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_player_support"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "support"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": false
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "support"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.9
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.05
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.1
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.25
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.1
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.05
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "support_churn_precedence",
+      "name": "support churn precedence",
+      "tags": [
+        "synthetic",
+        "support_conversation",
+        "policy_edge"
+      ],
+      "input": {
+        "channel": "support_conversation",
+        "content": "Please fix my purchase; I may quit if it stays broken."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "player_support"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_player_support"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "support"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": false
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "support"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.7
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.06
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.05
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.7
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.55
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.75
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "review_churn_boundary",
+      "name": "review churn boundary",
+      "tags": [
+        "synthetic",
+        "review",
+        "policy_edge"
+      ],
+      "input": {
+        "channel": "review",
+        "content": "I am uninstalling today. The repeated crashes ruined it for me."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "churn_attention"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_churn_attention"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "player_care"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": true
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "feedback"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.89
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.05
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.05
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.7
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.78
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.25
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "review_positive",
+      "name": "review positive",
+      "tags": [
+        "synthetic",
+        "review"
+      ],
+      "input": {
+        "channel": "review",
+        "content": "Great event this week. I am excited to play again tomorrow."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "player_feedback"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_player_feedback"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "insights"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": false
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "feedback"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.95
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.02
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.02
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.02
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.1
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 1.78
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "chat_ambiguous",
+      "name": "chat ambiguous",
+      "tags": [
+        "synthetic",
+        "in_game_chat"
+      ],
+      "input": {
+        "channel": "in_game_chat",
+        "content": "That thing again... maybe someone should check it."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "uncertain_review"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_uncertain_review"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "manual_triage"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": true
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "other"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.69
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.12
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.2
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.1
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.7
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.6
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "report_other",
+      "name": "report other",
+      "tags": [
+        "synthetic",
+        "player_report"
+      ],
+      "input": {
+        "channel": "player_report",
+        "content": "I have a question about where to post a suggestion."
+      },
+      "expected": {
+        "allowedOutcomes": [
+          "general_triage"
+        ],
+        "requiredNodes": [
+          "assess_content",
+          "prepare_annotations",
+          "route_content",
+          "out_general_triage"
+        ],
+        "assertions": [
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "queue"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "manual_triage"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "requiresReview"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": true
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "category"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": "other"
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "categoryConfidence"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.82
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "toxicityProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.02
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "suspiciousProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.02
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "annotations",
+                "churnProbability"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.05
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "frustration"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.2
+            }
+          },
+          {
+            "op": "eq",
+            "left": {
+              "op": "ref",
+              "path": [
+                "result",
+                "value",
+                "scores",
+                "engagement"
+              ]
+            },
+            "right": {
+              "op": "literal",
+              "value": 0.6
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

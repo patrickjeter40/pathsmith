@@ -1,3 +1,7 @@
-console.log(
-  "M0–M1 uses file-based immutable reports. SQLite persistence and migrations are deferred to M2; no database was created or migrated.",
-);
+import { openStorage } from "../packages/storage/dist/index.js";
+const storage = openStorage({ dataDir: process.env.PATHSMITH_DATA_DIR });
+try {
+  console.log(`SQLite schema version ${storage.schemaVersion} is ready.`);
+} finally {
+  storage.close();
+}

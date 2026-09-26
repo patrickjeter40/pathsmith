@@ -90,6 +90,8 @@ textarea:focus-visible,
 .sidebar-caption {
   margin-bottom: -20px;
 }
+nav a { color: #9daebb; text-decoration: none; padding: 9px 12px; border-radius: 5px; }
+nav a:hover { color: #c1edde; background: #203730; }
 nav {
   display: grid;
   gap: 7px;
@@ -386,6 +388,26 @@ select {
   gap: 32px;
   align-items: center;
 }
+.m2-panel { border: 1px solid #303d49; border-radius: 9px; background: #131d27; padding: 18px; margin: 0 0 20px; min-width: 0; }
+.m2-panel label { color: #9fb0bf; font-size: 12px; display: grid; gap: 6px; min-width: 0; }
+.m2-panel select { max-width: min(100%, 280px); }
+.m2-panel h3 { font-size: 14px; font-weight: 600; margin: 18px 0 9px; }
+.row, .section-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.section-heading { justify-content: space-between; margin-bottom: 12px; }
+.section-heading h2, .section-heading h3 { margin: 4px 0; }
+.hint { font-size: 12px; color: #8ea2b3; }
+.notice { border: 1px solid #456979; background: #182b37; border-radius: 6px; padding: 10px 13px; overflow-wrap: anywhere; }
+.notice.conflict { border-color: #b37e53; background: #392b21; }
+.scenario-editors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.scenario-editors textarea, .suite-json { width: 100%; min-height: 155px; resize: vertical; background: #101922; color: #b8d5e7; border: 1px solid #344251; border-radius: 5px; padding: 10px; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+.suite-json { min-height: 300px; margin-top: 12px; }
+.history, .case-results { display: grid; gap: 6px; max-height: 280px; overflow: auto; }
+.history button, .case-results button { text-align: left; overflow-wrap: anywhere; }
+.selected-run { border-color: #8cd1bb; background: #203730; }
+.load-more { display: block; margin-top: 10px; width: 100%; text-align: center; }
+.run-details { margin-top: 18px; border-top: 1px solid #344251; padding-top: 12px; min-width: 0; }
+.run-details pre, .trace pre { max-height: 370px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #101922; border: 1px solid #344251; border-radius: 5px; padding: 12px; font: 11px/1.5 ui-monospace, Consolas, monospace; }
+.diagnostics { color: #f5b488; font-size: 12px; }
 .next-step p {
   font-size: 12px;
   color: #8296a6;
@@ -426,6 +448,7 @@ select {
   .editor {
     grid-template-columns: minmax(0, 1fr) 260px;
   }
+  .scenario-editors { grid-template-columns: minmax(0, 1fr); }
   .milestone-note {
     display: block;
   }

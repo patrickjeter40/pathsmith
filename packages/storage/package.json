@@ -14,9 +14,16 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@pathsmith/contracts": "workspace:*"
+    "@pathsmith/contracts": "workspace:*",
+    "@pathsmith/core": "workspace:*",
+    "@pathsmith/evaluation": "workspace:*",
+    "@pathsmith/provider-mock": "workspace:*",
+    "@types/better-sqlite3": "9.6.0",
+    "better-sqlite3": "13.0.3",
+    "drizzle-orm": "0.45.3"
   }
 }

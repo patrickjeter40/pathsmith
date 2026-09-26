@@ -1,16 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { request } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createApi } from "../apps/api/dist/app.js";
 test("Nest built API: local health, origin/host/mutation/body limits, sanitized errors", async () => {
-  const app = await createApi({ port: 0 });
+  const dataDir = mkdtempSync(join(tmpdir(), "pathsmith-api-controls-"));
+  const app = await createApi({ port: 0, dataDir });
   try {
     const url = await app.getUrl();
     let response = await fetch(`${url}/api/v1/health`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-store");
     const health = await response.json();
-    assert.equal(health.database.status, "not_implemented");
+    assert.equal(health.database.status, "ready");
+    assert.equal(health.database.schemaVersion, 1);
     const hostile = await new Promise((resolve, reject) => {
       const req = request(
         `${url}/api/v1/health`,
@@ -72,6 +77,7 @@ test("Nest built API: local health, origin/host/mutation/body limits, sanitized 
     });
   } finally {
     await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 test("API refuses non-loopback binding", async () => {

@@ -1,5 +1,836 @@
-/** Explicit server-derived context for repositories introduced in milestone M2. */
-export interface WorkspaceContext {
-  workspaceId: string;
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { resolve, join } from "node:path";
+import Database from "better-sqlite3";
+import {
+  drizzle,
+  type BetterSQLite3Database,
+} from "drizzle-orm/better-sqlite3";
+import { sql } from "drizzle-orm";
+import {
+  inspectJson,
+  validateWorkflow,
+  validateSuite,
+  validateProfile,
+  type Json,
+  type Workflow,
+} from "@pathsmith/contracts";
+import {
+  assertValid,
+  canonicalize,
+  hash,
+  workflowHashes,
+  resolveLimits,
+  RUNTIME_VERSION,
+  type ExecutionError,
+} from "@pathsmith/core";
+import { createMockProvider } from "@pathsmith/provider-mock";
+import type { RunReport, ScenarioResult } from "@pathsmith/evaluation";
+import { migrate } from "./migrations.js";
+import type {
+  WorkspaceContext,
+  ProjectRecord,
+  WorkflowRecord,
+  SuiteRecord,
+  WorkflowVersion,
+  SuiteVersion,
+  QueueRunInput,
+  RunRecord,
+  RunSnapshot,
+  RunStatus,
+  ScenarioRunRecord,
+  PageOptions,
+  Page,
+} from "./types.js";
+export * from "./types.js";
+
+export class StorageError extends Error {
+  constructor(
+    public readonly code:
+      | "NOT_FOUND"
+      | "DRAFT_CONFLICT"
+      | "LIFECYCLE_CONFLICT"
+      | "STORAGE_LOCKED"
+      | "INVALID_REQUEST",
+    message: string,
+  ) {
+    super(message);
+    this.name = "StorageError";
+  }
 }
-export const implementationStatus = "deferred-to-M2" as const;
+const now = () => new Date().toISOString();
+const encode = (value: unknown) => canonicalize(value);
+const decode = <T>(value: string): T => JSON.parse(value) as T;
+function json(value: unknown, maxBytes: number): Json {
+  const diagnostics = inspectJson(value, maxBytes);
+  assertValid(
+    { valid: diagnostics.length === 0, diagnostics },
+    "ARTIFACT_INVALID",
+  );
+  return decode<Json>(encode(value));
+}
+function nameValue(value: string) {
+  if (typeof value !== "string" || !value.trim() || value.length > 200)
+    throw new StorageError(
+      "INVALID_REQUEST",
+      "Name must contain 1–200 characters",
+    );
+  return value.trim();
+}
+const pageOptions = (options: PageOptions = {}) => {
+  const offset = options.offset ?? 0,
+    limit = options.limit ?? 50;
+  if (
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100
+  )
+    throw new StorageError("INVALID_REQUEST", "Invalid pagination");
+  return { offset, limit };
+};
+type RunRow = {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  status: RunStatus;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  snapshot: string;
+  report: string | null;
+  error: string | null;
+  completed_scenarios: number;
+};
+
+export function openStorage(
+  options: {
+    dataDir?: string;
+    workspaceId?: string;
+    workspaceName?: string;
+  } = {},
+): SqliteStorage {
+  return new SqliteStorage(options);
+}
+
+export class SqliteStorage {
+  readonly localContext: WorkspaceContext;
+  readonly dataDir: string;
+  readonly schemaVersion: number;
+  private readonly connection!: Database.Database;
+  private readonly lock: Database.Database;
+  private readonly db: BetterSQLite3Database;
+  private closed = false;
+
+  constructor(
+    options: {
+      dataDir?: string;
+      workspaceId?: string;
+      workspaceName?: string;
+    } = {},
+  ) {
+    this.dataDir = resolve(options.dataDir ?? ".pathsmith");
+    mkdirSync(this.dataDir, { recursive: true });
+    // An OS-held rollback-journal lock is released even after a process crash.
+    this.lock = new Database(join(this.dataDir, "runner-lock.sqlite"), {
+      timeout: 0,
+    });
+    try {
+      this.lock.exec(
+        "PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS owner (id INTEGER)",
+      );
+    } catch {
+      this.lock.close();
+      throw new StorageError(
+        "STORAGE_LOCKED",
+        "Another Pathsmith process owns this data directory",
+      );
+    }
+    try {
+      this.connection = new Database(join(this.dataDir, "pathsmith.sqlite"));
+      this.connection.pragma("foreign_keys = ON");
+      this.connection.pragma("journal_mode = WAL");
+      this.db = drizzle(this.connection);
+      this.schemaVersion = migrate(this.db);
+      this.localContext = Object.freeze({
+        workspaceId: options.workspaceId ?? "local",
+      });
+      this.db.run(
+        sql`INSERT INTO workspaces(id,name) VALUES (${this.localContext.workspaceId},${options.workspaceName ?? "Local workspace"}) ON CONFLICT(id) DO NOTHING`,
+      );
+      const error: ExecutionError = {
+        code: "RUN_INTERRUPTED",
+        message:
+          "The application stopped before this run finished. Start a new run to retry.",
+        retryable: false,
+      };
+      this.db.run(
+        sql`UPDATE runs SET status='interrupted',completed_at=${now()},error=${encode(error)} WHERE status IN ('queued','running','canceling')`,
+      );
+    } catch (error) {
+      this.connection?.close();
+      this.lock.close();
+      throw error;
+    }
+  }
+  close(): void {
+    if (!this.closed) {
+      this.connection.close();
+      this.lock.close();
+      this.closed = true;
+    }
+  }
+  private record<T>(table: string, ctx: WorkspaceContext, id: string): T {
+    const row = this.db.get<{ record: string }>(
+      sql`SELECT record FROM ${sql.identifier(table)} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+    );
+    if (!row)
+      throw new StorageError(
+        "NOT_FOUND",
+        "Resource not found in this workspace",
+      );
+    return decode<T>(row.record);
+  }
+  private records<T>(
+    table: string,
+    ctx: WorkspaceContext,
+    projectId?: string,
+  ): T[] {
+    const where =
+      projectId === undefined
+        ? sql`workspace_id=${ctx.workspaceId}`
+        : sql`workspace_id=${ctx.workspaceId} AND project_id=${projectId}`;
+    return this.db
+      .all<{ record: string }>(
+        sql`SELECT record FROM ${sql.identifier(table)} WHERE ${where} ORDER BY rowid`,
+      )
+      .map((row) => decode<T>(row.record));
+  }
+  createProject(ctx: WorkspaceContext, name: string): ProjectRecord {
+    const item = {
+      id: randomUUID(),
+      workspaceId: ctx.workspaceId,
+      name: nameValue(name),
+      createdAt: now(),
+    };
+    this.db.run(
+      sql`INSERT INTO projects VALUES (${item.id},${ctx.workspaceId},${encode(item)})`,
+    );
+    return item;
+  }
+  listProjects(ctx: WorkspaceContext): ProjectRecord[] {
+    return this.records("projects", ctx);
+  }
+  getProject(ctx: WorkspaceContext, id: string): ProjectRecord {
+    return this.record("projects", ctx, id);
+  }
+  deleteProject(ctx: WorkspaceContext, id: string): void {
+    this.getProject(ctx, id);
+    if (
+      this.db.get(
+        sql`SELECT 1 FROM runs WHERE workspace_id=${ctx.workspaceId} AND project_id=${id} AND status IN ('queued','running','canceling')`,
+      )
+    )
+      throw new StorageError(
+        "LIFECYCLE_CONFLICT",
+        "Cancel active runs before deleting the project",
+      );
+    this.db.transaction((tx) => {
+      if (
+        tx.get(
+          sql`SELECT 1 FROM runs WHERE workspace_id=${ctx.workspaceId} AND project_id=${id} AND source_run_id IS NOT NULL`,
+        )
+      )
+        throw new StorageError(
+          "LIFECYCLE_CONFLICT",
+          "Delete dependent replay runs first",
+        );
+      tx.run(
+        sql`DELETE FROM runs WHERE workspace_id=${ctx.workspaceId} AND project_id=${id}`,
+      );
+      tx.run(
+        sql`DELETE FROM projects WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+      );
+    });
+  }
+  createWorkflow(
+    ctx: WorkspaceContext,
+    projectId: string,
+    input: { name: string; definition?: Json; layout?: Json },
+  ): WorkflowRecord {
+    this.getProject(ctx, projectId);
+    const definition = json(input.definition ?? {}, 512 * 1024),
+      layout = json(input.layout ?? {}, 512 * 1024);
+    const item: WorkflowRecord = {
+      id: randomUUID(),
+      workspaceId: ctx.workspaceId,
+      projectId,
+      name: nameValue(input.name),
+      definition,
+      layout,
+      draftRevision: 1,
+      diagnostics: validateWorkflow(definition).diagnostics,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    this.db.run(
+      sql`INSERT INTO workflows VALUES (${item.id},${ctx.workspaceId},${projectId},1,${encode(item)})`,
+    );
+    return item;
+  }
+  getWorkflow(ctx: WorkspaceContext, id: string): WorkflowRecord {
+    return this.record("workflows", ctx, id);
+  }
+  listWorkflows(ctx: WorkspaceContext, projectId: string): WorkflowRecord[] {
+    this.getProject(ctx, projectId);
+    return this.records("workflows", ctx, projectId);
+  }
+  saveWorkflowDraft(
+    ctx: WorkspaceContext,
+    id: string,
+    input: { expectedRevision: number; definition: Json; layout?: Json },
+  ): WorkflowRecord {
+    const previous = this.getWorkflow(ctx, id),
+      definition = json(input.definition, 512 * 1024);
+    const item = {
+      ...previous,
+      definition,
+      layout: json(input.layout ?? previous.layout, 512 * 1024),
+      draftRevision: previous.draftRevision + 1,
+      diagnostics: validateWorkflow(definition).diagnostics,
+      updatedAt: now(),
+    };
+    this.saveDraft("workflows", ctx, id, input.expectedRevision, item);
+    return item;
+  }
+  private saveDraft(
+    table: string,
+    ctx: WorkspaceContext,
+    id: string,
+    expectedRevision: number,
+    item: WorkflowRecord | SuiteRecord,
+  ) {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Expected revision must be a positive integer",
+      );
+    const changed = this.db.run(
+      sql`UPDATE ${sql.identifier(table)} SET revision=revision+1,record=${encode(item)} WHERE workspace_id=${ctx.workspaceId} AND id=${id} AND revision=${expectedRevision}`,
+    );
+    if (changed.changes !== 1)
+      throw new StorageError(
+        "DRAFT_CONFLICT",
+        "Draft changed in another session; reload before saving",
+      );
+  }
+  publishWorkflowVersion(
+    ctx: WorkspaceContext,
+    id: string,
+    expectedRevision?: number,
+  ): WorkflowVersion {
+    const draft = this.getWorkflow(ctx, id);
+    if (
+      expectedRevision !== undefined &&
+      expectedRevision !== draft.draftRevision
+    )
+      throw new StorageError(
+        "DRAFT_CONFLICT",
+        "Draft changed before publishing",
+      );
+    assertValid(validateWorkflow(draft.definition));
+    const definition = draft.definition as unknown as Workflow;
+    const item: WorkflowVersion = {
+      id: randomUUID(),
+      workspaceId: ctx.workspaceId,
+      projectId: draft.projectId,
+      workflowId: id,
+      draftRevision: draft.draftRevision,
+      definition,
+      layout: draft.layout,
+      ...workflowHashes(definition),
+      createdAt: now(),
+    };
+    this.db.run(
+      sql`INSERT INTO workflow_versions VALUES (${item.id},${ctx.workspaceId},${item.projectId},${id},${encode(item)})`,
+    );
+    return item;
+  }
+  getWorkflowVersion(ctx: WorkspaceContext, id: string): WorkflowVersion {
+    return this.record("workflow_versions", ctx, id);
+  }
+  listWorkflowVersions(ctx: WorkspaceContext, id: string): WorkflowVersion[] {
+    this.getWorkflow(ctx, id);
+    return this.db
+      .all<{ record: string }>(
+        sql`SELECT record FROM workflow_versions WHERE workspace_id=${ctx.workspaceId} AND parent_id=${id} ORDER BY rowid DESC`,
+      )
+      .map((row) => decode<WorkflowVersion>(row.record));
+  }
+  createSuite(
+    ctx: WorkspaceContext,
+    projectId: string,
+    input: { name: string; definition?: Json },
+  ): SuiteRecord {
+    this.getProject(ctx, projectId);
+    const item: SuiteRecord = {
+      id: randomUUID(),
+      workspaceId: ctx.workspaceId,
+      projectId,
+      name: nameValue(input.name),
+      definition: json(input.definition ?? {}, 8 * 1024 * 1024),
+      draftRevision: 1,
+      diagnostics: [],
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    this.db.run(
+      sql`INSERT INTO suites VALUES (${item.id},${ctx.workspaceId},${projectId},1,${encode(item)})`,
+    );
+    return item;
+  }
+  getSuite(ctx: WorkspaceContext, id: string): SuiteRecord {
+    return this.record("suites", ctx, id);
+  }
+  listSuites(ctx: WorkspaceContext, projectId: string): SuiteRecord[] {
+    this.getProject(ctx, projectId);
+    return this.records("suites", ctx, projectId);
+  }
+  saveSuiteDraft(
+    ctx: WorkspaceContext,
+    id: string,
+    input: {
+      expectedRevision: number;
+      definition: Json;
+      workflowVersionId?: string;
+    },
+  ): SuiteRecord {
+    const draft = this.getSuite(ctx, id),
+      definition = json(input.definition, 8 * 1024 * 1024);
+    const workflow = input.workflowVersionId
+      ? this.getWorkflowVersion(ctx, input.workflowVersionId)
+      : undefined;
+    if (workflow && workflow.projectId !== draft.projectId)
+      throw new StorageError(
+        "NOT_FOUND",
+        "Workflow version does not belong to this project",
+      );
+    const item = {
+      ...draft,
+      definition,
+      draftRevision: draft.draftRevision + 1,
+      diagnostics: workflow
+        ? validateSuite(definition, workflow.definition).diagnostics
+        : [],
+      updatedAt: now(),
+    };
+    this.saveDraft("suites", ctx, id, input.expectedRevision, item);
+    return item;
+  }
+  publishSuiteVersion(
+    ctx: WorkspaceContext,
+    id: string,
+    workflowVersionId: string,
+    expectedRevision?: number,
+  ): SuiteVersion {
+    const draft = this.getSuite(ctx, id),
+      workflow = this.getWorkflowVersion(ctx, workflowVersionId);
+    if (draft.projectId !== workflow.projectId)
+      throw new StorageError(
+        "NOT_FOUND",
+        "Workflow version does not belong to this project",
+      );
+    if (
+      expectedRevision !== undefined &&
+      expectedRevision !== draft.draftRevision
+    )
+      throw new StorageError(
+        "DRAFT_CONFLICT",
+        "Draft changed before publishing",
+      );
+    assertValid(
+      validateSuite(draft.definition, workflow.definition),
+      "SUITE_INVALID",
+    );
+    const item: SuiteVersion = {
+      id: randomUUID(),
+      workspaceId: ctx.workspaceId,
+      projectId: draft.projectId,
+      suiteId: id,
+      draftRevision: draft.draftRevision,
+      definition: draft.definition as unknown as SuiteVersion["definition"],
+      suiteSnapshotHash: hash(draft.definition),
+      createdAt: now(),
+    };
+    this.db.run(
+      sql`INSERT INTO suite_versions VALUES (${item.id},${ctx.workspaceId},${item.projectId},${id},${encode(item)})`,
+    );
+    return item;
+  }
+  getSuiteVersion(ctx: WorkspaceContext, id: string): SuiteVersion {
+    return this.record("suite_versions", ctx, id);
+  }
+  listSuiteVersions(ctx: WorkspaceContext, id: string): SuiteVersion[] {
+    this.getSuite(ctx, id);
+    return this.db
+      .all<{ record: string }>(
+        sql`SELECT record FROM suite_versions WHERE workspace_id=${ctx.workspaceId} AND parent_id=${id} ORDER BY rowid DESC`,
+      )
+      .map((row) => decode<SuiteVersion>(row.record));
+  }
+  queueRun(ctx: WorkspaceContext, input: QueueRunInput): RunRecord {
+    const workflow = this.getWorkflowVersion(ctx, input.workflowVersionId),
+      suite = this.getSuiteVersion(ctx, input.suiteVersionId);
+    if (workflow.projectId !== suite.projectId)
+      throw new StorageError(
+        "NOT_FOUND",
+        "Versions do not belong to the same project",
+      );
+    if (input.mode !== undefined && input.mode !== "mock")
+      throw new StorageError("INVALID_REQUEST", "Only mock runs are available");
+    assertValid(validateWorkflow(workflow.definition));
+    assertValid(
+      validateSuite(
+        suite.definition,
+        workflow.definition,
+        input.selectedScenarioIds,
+      ),
+      "SUITE_INVALID",
+    );
+    assertValid(
+      validateProfile(input.profile, workflow.definition),
+      "PROVIDER_NOT_CONFIGURED",
+    );
+    const adapter = createMockProvider(input.fixtures),
+      concurrency = input.concurrency ?? 16;
+    if (
+      !Number.isSafeInteger(concurrency) ||
+      concurrency < 1 ||
+      concurrency > 16
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Concurrency must be between 1 and 16",
+      );
+    if (
+      Object.values(input.profile.bindings).some(
+        (binding) => binding.providerId !== "mock",
+      )
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "All bindings must select the mock provider",
+      );
+    const snapshot: RunSnapshot = {
+      workflowVersionId: workflow.id,
+      suiteVersionId: suite.id,
+      workflow: workflow.definition,
+      layout: workflow.layout,
+      suite: suite.definition,
+      artifactHash: workflow.artifactHash,
+      workflowSemanticHash: workflow.workflowSemanticHash,
+      suiteSnapshotHash: suite.suiteSnapshotHash,
+      profile: input.profile,
+      limits: resolveLimits(input.limits),
+      selectedScenarioIds: (
+        input.selectedScenarioIds ??
+        suite.definition.scenarios.map((item) => item.id)
+      )
+        .slice()
+        .sort(),
+      concurrency,
+      mode: "mock",
+      origin: "synthetic",
+      sourceRunId: null,
+      runtimeVersion: RUNTIME_VERSION,
+      fixtures: input.fixtures,
+      adapters: Object.fromEntries(
+        Object.entries(input.profile.bindings).map(([name, binding]) => [
+          name,
+          {
+            providerId: binding.providerId,
+            requestedModel: binding.model,
+            adapterVersion: adapter.version,
+            normalizerVersion: adapter.normalizerVersion,
+            resolvedModels: [],
+          },
+        ]),
+      ),
+    };
+    const id = randomUUID();
+    this.db.run(
+      sql`INSERT INTO runs(id,workspace_id,project_id,workflow_version_id,suite_version_id,status,created_at,snapshot) VALUES (${id},${ctx.workspaceId},${workflow.projectId},${workflow.id},${suite.id},'queued',${now()},${encode(snapshot)})`,
+    );
+    return this.getRun(ctx, id);
+  }
+  private runRow(row: RunRow): RunRecord {
+    return {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      projectId: row.project_id,
+      status: row.status,
+      createdAt: row.created_at,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      snapshot: decode(row.snapshot),
+      report: row.report ? decode(row.report) : null,
+      error: row.error ? decode(row.error) : null,
+      completedScenarios: row.completed_scenarios,
+    };
+  }
+  getRun(ctx: WorkspaceContext, id: string): RunRecord {
+    const row = this.db.get<RunRow>(
+      sql`SELECT runs.*,(SELECT COUNT(*) FROM scenario_runs WHERE run_id=runs.id) AS completed_scenarios FROM runs WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+    );
+    if (!row)
+      throw new StorageError("NOT_FOUND", "Run not found in this workspace");
+    return this.runRow(row);
+  }
+  listRuns(
+    ctx: WorkspaceContext,
+    options: PageOptions & { projectId?: string } = {},
+  ): Page<RunRecord> {
+    const { offset, limit } = pageOptions(options),
+      where = options.projectId
+        ? sql`workspace_id=${ctx.workspaceId} AND project_id=${options.projectId}`
+        : sql`workspace_id=${ctx.workspaceId}`;
+    return {
+      offset,
+      limit,
+      total: this.db.get<{ total: number }>(
+        sql`SELECT COUNT(*) AS total FROM runs WHERE ${where}`,
+      )!.total,
+      items: this.db
+        .all<RunRow>(
+          sql`SELECT runs.*,(SELECT COUNT(*) FROM scenario_runs WHERE run_id=runs.id) AS completed_scenarios FROM runs WHERE ${where} ORDER BY created_at DESC,rowid DESC LIMIT ${limit} OFFSET ${offset}`,
+        )
+        .map((row) => this.runRow(row)),
+    };
+  }
+  claimNextRun(ctx: WorkspaceContext): RunRecord | null {
+    return this.db.transaction((tx) => {
+      if (
+        tx.get(sql`SELECT 1 FROM runs WHERE status IN ('running','canceling')`)
+      )
+        return null;
+      const row = tx.get<{ id: string }>(
+        sql`SELECT id FROM runs WHERE workspace_id=${ctx.workspaceId} AND status='queued' ORDER BY created_at,rowid LIMIT 1`,
+      );
+      if (!row) return null;
+      tx.run(
+        sql`UPDATE runs SET status='running',started_at=${now()} WHERE id=${row.id} AND workspace_id=${ctx.workspaceId} AND status='queued'`,
+      );
+      return this.getRun(ctx, row.id);
+    });
+  }
+  requestCancellation(
+    ctx: WorkspaceContext,
+    id: string,
+  ): { run: RunRecord; active: boolean } {
+    const run = this.getRun(ctx, id);
+    if (run.status === "queued")
+      this.db.run(
+        sql`UPDATE runs SET status='canceled',completed_at=${now()} WHERE id=${id} AND workspace_id=${ctx.workspaceId}`,
+      );
+    else if (run.status === "running")
+      this.db.run(
+        sql`UPDATE runs SET status='canceling' WHERE id=${id} AND workspace_id=${ctx.workspaceId}`,
+      );
+    const result = this.getRun(ctx, id);
+    return { run: result, active: result.status === "canceling" };
+  }
+  appendScenarioResult(
+    ctx: WorkspaceContext,
+    runId: string,
+    result: ScenarioResult,
+  ): ScenarioRunRecord {
+    const run = this.getRun(ctx, runId);
+    if (!["running", "canceling"].includes(run.status))
+      throw new StorageError("LIFECYCLE_CONFLICT", "Run is not active");
+    const position = run.snapshot.suite.scenarios
+      .filter((item) => run.snapshot.selectedScenarioIds.includes(item.id))
+      .findIndex((item) => item.id === result.scenarioId);
+    const source = run.snapshot.suite.scenarios.find(
+      (item) => item.id === result.scenarioId,
+    );
+    if (position < 0 || !source || hash(source.input) !== hash(result.input))
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Scenario result does not match the run snapshot",
+      );
+    const existing = this.db.get<{ id: string; result: string }>(
+      sql`SELECT id,result FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND run_id=${runId} AND scenario_id=${result.scenarioId}`,
+    );
+    const payload = encode(result);
+    if (existing) {
+      if (existing.result !== payload)
+        throw new StorageError(
+          "LIFECYCLE_CONFLICT",
+          "Scenario result is immutable",
+        );
+      return {
+        id: existing.id,
+        runId,
+        scenarioId: result.scenarioId,
+        position,
+        result: decode(payload),
+      };
+    }
+    if (
+      result.events.some(
+        (event, index) =>
+          !Number.isSafeInteger(event.sequence) ||
+          (index > 0 && event.sequence <= result.events[index - 1].sequence),
+      )
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Trace sequences must increase",
+      );
+    if (
+      result.exchanges.some(
+        (exchange) =>
+          exchange.runId !== runId || exchange.scenarioId !== result.scenarioId,
+      )
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Exchange scope differs from its run",
+      );
+    const id = randomUUID();
+    this.db.transaction((tx) => {
+      tx.run(
+        sql`INSERT INTO scenario_runs VALUES (${id},${ctx.workspaceId},${run.projectId},${runId},${result.scenarioId},${position},${payload})`,
+      );
+      for (const event of result.events)
+        tx.run(
+          sql`INSERT INTO node_traces VALUES (${id},${event.sequence},${encode(event)})`,
+        );
+      for (const [index, exchange] of result.exchanges.entries())
+        tx.run(
+          sql`INSERT INTO provider_attempts VALUES (${id},${index},${encode(exchange)})`,
+        );
+    });
+    return {
+      id,
+      runId,
+      scenarioId: result.scenarioId,
+      position,
+      result: decode(payload),
+    };
+  }
+  finishRun(ctx: WorkspaceContext, id: string, report: RunReport): RunRecord {
+    const run = this.getRun(ctx, id),
+      snapshot = run.snapshot;
+    if (!["running", "canceling"].includes(run.status))
+      throw new StorageError("LIFECYCLE_CONFLICT", "Run is not active");
+    if (
+      report.id !== id ||
+      report.workspaceId !== ctx.workspaceId ||
+      report.projectId !== run.projectId ||
+      report.workflowSemanticHash !== snapshot.workflowSemanticHash ||
+      report.artifactHash !== snapshot.artifactHash ||
+      report.suiteSnapshotHash !== snapshot.suiteSnapshotHash ||
+      hash(report.workflow) !== hash(snapshot.workflow) ||
+      hash(report.suite) !== hash(snapshot.suite) ||
+      hash(report.profile) !== hash(snapshot.profile) ||
+      hash(report.limits) !== hash(snapshot.limits) ||
+      hash(report.selectedScenarioIds) !== hash(snapshot.selectedScenarioIds) ||
+      report.concurrency !== snapshot.concurrency ||
+      report.mode !== snapshot.mode ||
+      report.scenarios.length !== snapshot.selectedScenarioIds.length ||
+      new Set(report.scenarios.map((item) => item.scenarioId)).size !==
+        report.scenarios.length
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Report does not match its immutable run snapshot",
+      );
+    this.db.transaction((tx) => {
+      for (const result of report.scenarios)
+        this.appendScenarioResult(ctx, id, result);
+      tx.run(
+        sql`UPDATE runs SET status=${report.status},completed_at=${now()},report=${encode(report)},error=${report.error ? encode(report.error) : null} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+      );
+    });
+    return this.getRun(ctx, id);
+  }
+  failRun(ctx: WorkspaceContext, id: string, error: ExecutionError): RunRecord {
+    const run = this.getRun(ctx, id);
+    if (!["queued", "running", "canceling"].includes(run.status))
+      throw new StorageError("LIFECYCLE_CONFLICT", "Run is not active");
+    this.db.run(
+      sql`UPDATE runs SET status='failed',completed_at=${now()},error=${encode(error)} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+    );
+    return this.getRun(ctx, id);
+  }
+  listScenarioRuns(
+    ctx: WorkspaceContext,
+    runId: string,
+    options: PageOptions = {},
+  ): Page<ScenarioRunRecord> {
+    this.getRun(ctx, runId);
+    const { offset, limit } = pageOptions(options);
+    const rows = this.db.all<{
+      id: string;
+      scenario_id: string;
+      position: number;
+      result: string;
+    }>(
+      sql`SELECT id,scenario_id,position,result FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND run_id=${runId} ORDER BY position LIMIT ${limit} OFFSET ${offset}`,
+    );
+    return {
+      offset,
+      limit,
+      total: this.db.get<{ total: number }>(
+        sql`SELECT COUNT(*) AS total FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND run_id=${runId}`,
+      )!.total,
+      items: rows.map((row) => ({
+        id: row.id,
+        runId,
+        scenarioId: row.scenario_id,
+        position: row.position,
+        result: decode(row.result),
+      })),
+    };
+  }
+  getScenarioTrace(ctx: WorkspaceContext, id: string): ScenarioRunRecord {
+    const row = this.db.get<{
+      run_id: string;
+      scenario_id: string;
+      position: number;
+      result: string;
+    }>(
+      sql`SELECT * FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+    );
+    if (!row)
+      throw new StorageError(
+        "NOT_FOUND",
+        "Scenario result not found in this workspace",
+      );
+    return {
+      id,
+      runId: row.run_id,
+      scenarioId: row.scenario_id,
+      position: row.position,
+      result: decode(row.result),
+    };
+  }
+  deleteRun(ctx: WorkspaceContext, id: string): void {
+    const run = this.getRun(ctx, id);
+    if (["queued", "running", "canceling"].includes(run.status))
+      throw new StorageError(
+        "LIFECYCLE_CONFLICT",
+        "Cancel the active run before deleting it",
+      );
+    if (this.db.get(sql`SELECT 1 FROM runs WHERE source_run_id=${id}`))
+      throw new StorageError(
+        "LIFECYCLE_CONFLICT",
+        "Delete dependent replay runs first",
+      );
+    this.db.run(
+      sql`DELETE FROM runs WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+    );
+  }
+}
