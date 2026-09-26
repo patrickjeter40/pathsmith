@@ -13,29 +13,36 @@ import {
 } from "@pathsmith/contracts";
 import {
   assertValid,
-  hash,
-  workflowHashes,
+  canonicalize,
+  type ExecutionMode,
+  type ExecutionLimits,
   PathsmithError,
   toExecutionError,
   type Bindings,
 } from "@pathsmith/core";
-import {
-  compareRuns,
-  runSuite,
-  MAX_REPORT_BYTES,
-  type RunReport,
-} from "@pathsmith/evaluation";
+import { compareRuns, runSuite, MAX_REPORT_BYTES } from "@pathsmith/evaluation";
 import { createMockProvider } from "@pathsmith/provider-mock";
+import { createReplayBindings } from "@pathsmith/provider-replay";
+import { createJevProvider } from "@pathsmith/provider-jev";
+import { readRunReport } from "./report.js";
 
-const help = `Pathsmith 0.1 — offline execution foundation (M0–M1)
+const help = `Pathsmith 0.1 ? local execution and recorded replay
   validate --workflow <file> [--suite <file>] [--out <file>]
-  run --workflow <file> --suite <file> --profile <file>
-      --mode mock --fixtures <file> [--scenarios id,id] [--concurrency 1..16] --out <file>
-  compare --baseline <report> --candidate <report> [--strict] --out <file>
+  run --workflow <file> --suite <file> --out <file>
+      --mode mock --profile <file> --fixtures <file>
+      --mode replay --source <report> [--profile <matching-profile>]
+      --mode live --profile <file> --enable-live
+      [--scenarios id,id] [--concurrency 1..16] [--limits <file>]
+      [--http-attempt-limit 1..2000]
+  compare --baseline <report> --candidate <report> [--strict]
+      [--accept-mixed-model] --out <file>
 
+Mock is the default. Replay is offline and source-scoped, with no live fallback.
+Live also requires TYPESAFE_API_KEY and sends state/questions to TypeSafe;
+usage may be billed. The total HTTP attempt limit defaults to 200.
 Run artifacts contain inputs, questions, and responses. Keep them private.
-Live calls and strict recorded replay are deferred to M4. No live fallback exists.
-Exit: 0 success, 1 assertion/gate failure, 2 invalid/incomplete/execution failure.
+Source recording import limit: 8 MiB. Exit: 0 success, 1 assertion/gate failure,
+2 invalid/incomplete/execution failure. Available reports are written first.
 `;
 const optionNames = [
   "workflow",
@@ -48,6 +55,9 @@ const optionNames = [
   "candidate",
   "scenarios",
   "concurrency",
+  "source",
+  "limits",
+  "http-attempt-limit",
 ];
 let outputPath: string | undefined;
 const cancel = new AbortController();
@@ -70,48 +80,6 @@ async function output(value: unknown) {
     await writeFile(outputPath, content, { mode: 0o600 });
   } else process.stdout.write(content);
 }
-function report(value: unknown): RunReport {
-  const r = value as RunReport;
-  if (
-    !r ||
-    r.formatVersion !== "0.1" ||
-    r.artifactType !== "pathsmith_run" ||
-    !Array.isArray(r.scenarios) ||
-    !Array.isArray(r.selectedScenarioIds) ||
-    !r.selectedScenarioIds.length ||
-    new Set(r.selectedScenarioIds).size !== r.selectedScenarioIds.length ||
-    r.mode !== "mock"
-  )
-    throw new PathsmithError(
-      "ARTIFACT_INVALID",
-      "Expected a Pathsmith run report",
-    );
-  assertValid(validateWorkflow(r.workflow), "ARTIFACT_INVALID");
-  assertValid(
-    validateSuite(r.suite, r.workflow, r.selectedScenarioIds),
-    "ARTIFACT_INVALID",
-  );
-  if (
-    hash(r.suite) !== r.suiteSnapshotHash ||
-    hash(r.workflow) !== r.artifactHash ||
-    workflowHashes(r.workflow).workflowSemanticHash !== r.workflowSemanticHash
-  )
-    throw new PathsmithError("ARTIFACT_INVALID", "Snapshot hash mismatch");
-  for (const s of r.scenarios) {
-    const scenario = r.suite.scenarios.find((c) => c.id === s.scenarioId);
-    if (
-      !scenario ||
-      hash(s.input) !== hash(scenario.input) ||
-      !["completed", "failed", "canceled"].includes(s.status) ||
-      !["passed", "failed", "not_evaluated"].includes(s.assertionStatus) ||
-      !Array.isArray(s.selectedEdges) ||
-      !Array.isArray(s.assertions) ||
-      (s.status === "completed" && !s.result)
-    )
-      throw new PathsmithError("ARTIFACT_INVALID", "Invalid scenario result");
-  }
-  return r;
-}
 async function main() {
   const parsed = parseArgs({
     args: process.argv.slice(2),
@@ -122,6 +90,8 @@ async function main() {
         optionNames.map((name) => [name, { type: "string" as const }]),
       ),
       strict: { type: "boolean" },
+      "enable-live": { type: "boolean" },
+      "accept-mixed-model": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -154,34 +124,95 @@ async function main() {
     await output(validation);
     process.exitCode = validation.valid ? 0 : 2;
   } else if (command === "run") {
+    const mode = (values.mode ?? "mock") as ExecutionMode;
+    if (!["mock", "replay", "live"].includes(mode))
+      throw new PathsmithError("CLI_INVALID", "Unknown execution mode");
+    if (mode !== "live" && values["enable-live"])
+      throw new PathsmithError(
+        "CLI_INVALID",
+        "--enable-live requires explicit live mode",
+      );
+    if (mode === "live" && values["enable-live"] !== true)
+      throw new PathsmithError(
+        "LIVE_DISABLED",
+        "Live mode requires --enable-live",
+      );
+    if (
+      (mode === "replay" && values.fixtures) ||
+      (mode !== "replay" && values.source) ||
+      (mode === "live" && values.fixtures)
+    )
+      throw new PathsmithError(
+        "CLI_INVALID",
+        "Conflicting mock, replay, or live options",
+      );
     const workflow = await read(required("workflow"), 512 * 1024),
-      suite = await read(required("suite")),
-      profile = await read(required("profile"));
+      suite = await read(required("suite"));
+    const selectedScenarioIds =
+      typeof values.scenarios === "string"
+        ? values.scenarios.split(",")
+        : undefined;
     assertValid(validateWorkflow(workflow));
     assertValid(
-      validateProfile(profile, workflow as Workflow),
-      "PROFILE_INVALID",
+      validateSuite(suite, workflow as Workflow, selectedScenarioIds),
+      "SUITE_INVALID",
     );
-    if (values.mode && values.mode !== "mock")
-      throw new PathsmithError(
-        "PROVIDER_NOT_CONFIGURED",
-        "M1 implements mock mode only; replay and live are deferred to M4",
+    const limits = values.limits
+      ? ((await read(required("limits"))) as Partial<ExecutionLimits>)
+      : undefined;
+    if (
+      limits !== undefined &&
+      (!limits || typeof limits !== "object" || Array.isArray(limits))
+    )
+      throw new PathsmithError("CLI_INVALID", "Limits must be a JSON object");
+    let bindings: Bindings;
+    let sourceRunId: string | undefined;
+    let sourceOrigin: "synthetic" | "live" | undefined;
+    if (mode === "replay") {
+      const source = readRunReport(await read(required("source")));
+      if (values.profile) {
+        const profile = await read(required("profile"));
+        assertValid(
+          validateProfile(profile, workflow as Workflow),
+          "PROFILE_INVALID",
+        );
+        if (canonicalize(profile) !== canonicalize(source.profile))
+          throw new PathsmithError(
+            "REPLAY_PROFILE_MISMATCH",
+            "Replay profile conflicts with the source recording",
+          );
+      }
+      bindings = createReplayBindings(source);
+      sourceRunId = source.id;
+      sourceOrigin = source.origin;
+    } else {
+      const profile = await read(required("profile"));
+      assertValid(
+        validateProfile(profile, workflow as Workflow),
+        "PROFILE_INVALID",
       );
-    const adapter = createMockProvider(await read(required("fixtures"))),
-      bindings: Bindings = {};
-    for (const [name, b] of Object.entries(
-      (profile as ExecutionProfile).bindings,
-    ))
-      bindings[name] = { ...b, adapter };
+      const adapter =
+        mode === "live"
+          ? createJevProvider({ apiKey: process.env.TYPESAFE_API_KEY ?? "" })
+          : createMockProvider(await read(required("fixtures")));
+      bindings = Object.fromEntries(
+        Object.entries((profile as ExecutionProfile).bindings).map(
+          ([name, binding]) => [name, { ...binding, adapter }],
+        ),
+      );
+    }
     const run = await runSuite({
       workflow: workflow as Workflow,
       suite: suite as Suite,
       bindings,
-      mode: "mock",
-      selectedScenarioIds:
-        typeof values.scenarios === "string"
-          ? values.scenarios.split(",")
-          : undefined,
+      mode,
+      sourceRunId,
+      sourceOrigin,
+      limits,
+      httpAttemptLimit: values["http-attempt-limit"]
+        ? Number(values["http-attempt-limit"])
+        : undefined,
+      selectedScenarioIds,
       concurrency: values.concurrency ? Number(values.concurrency) : undefined,
       signal: cancel.signal,
     });
@@ -190,10 +221,15 @@ async function main() {
     process.exitCode =
       run.status !== "completed" ? 2 : run.summary.assertionFailed ? 1 : 0;
   } else if (command === "compare") {
-    const baseline = report(await read(required("baseline"), MAX_REPORT_BYTES)),
-      candidate = report(await read(required("candidate"), MAX_REPORT_BYTES)),
+    const baseline = readRunReport(
+        await read(required("baseline"), MAX_REPORT_BYTES),
+      ),
+      candidate = readRunReport(
+        await read(required("candidate"), MAX_REPORT_BYTES),
+      ),
       comparison = compareRuns(baseline, candidate, {
         strict: values.strict === true,
+        acceptMixedModel: values["accept-mixed-model"] === true,
       });
     await output(comparison);
     process.exitCode =
@@ -202,7 +238,7 @@ async function main() {
         : comparison.gate === "fail"
           ? 1
           : 0;
-  } else throw new PathsmithError("CLI_INVALID", `Unknown command ${command}`);
+  } else throw new PathsmithError("CLI_INVALID", "Unknown command");
 }
 try {
   await main();

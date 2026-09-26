@@ -1,0 +1,7 @@
+# M4 replay and provider records
+
+- Replay executes the canonical workflow runtime against exact exchanges from one immutable source run. The local app requires that source and candidate runs belong to the same project and workspace, matching the existing composite foreign key. Comparisons may still pair compatible runs across projects within a workspace. A source run cannot be deleted while a replay run references it.
+- The Jev adapter uses the documented TypeSafe HTTP endpoint directly so each transport attempt is observable. One retry layer owns the per-call policy. The default suite budget is 200 actual HTTP attempts; an explicit override may increase it to at most 2,000. These are Pathsmith limits, not provider limits.
+- M2's table named `provider_attempts` held successful logical exchanges, including mock exchanges. Append-only SQLite migration v2 renames it to `provider_exchanges` without rewriting rows, and creates a new `provider_attempts` table for actual HTTP attempts. Historical snapshots and reports remain unchanged.
+- Live API runs require backend `PATHSMITH_ENABLE_LIVE=1`, a backend `TYPESAFE_API_KEY`, and `confirmLive: true` on the individual run request. Status reports only configuration booleans. Routine tests inject transport and make no Jev request.
+- Replay keeps source model and origin provenance. Its current HTTP attempts and token usage are zero; historical usage is reported separately and remains unknown if any source attempt lacks usage data.

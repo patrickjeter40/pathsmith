@@ -68,9 +68,15 @@ importers:
       '@pathsmith/evaluation':
         specifier: workspace:*
         version: link:../../packages/evaluation
+      '@pathsmith/provider-jev':
+        specifier: workspace:*
+        version: link:../../packages/provider-jev
       '@pathsmith/provider-mock':
         specifier: workspace:*
         version: link:../../packages/provider-mock
+      '@pathsmith/provider-replay':
+        specifier: workspace:*
+        version: link:../../packages/provider-replay
       '@pathsmith/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -121,9 +127,15 @@ importers:
       '@pathsmith/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@pathsmith/evaluation':
+        specifier: workspace:*
+        version: link:../../packages/evaluation
       '@pathsmith/provider-mock':
         specifier: workspace:*
         version: link:../../packages/provider-mock
+      '@pathsmith/provider-replay':
+        specifier: workspace:*
+        version: link:../../packages/provider-replay
 
   packages/cli:
     dependencies:
@@ -136,9 +148,15 @@ importers:
       '@pathsmith/evaluation':
         specifier: workspace:*
         version: link:../evaluation
+      '@pathsmith/provider-jev':
+        specifier: workspace:*
+        version: link:../provider-jev
       '@pathsmith/provider-mock':
         specifier: workspace:*
         version: link:../provider-mock
+      '@pathsmith/provider-replay':
+        specifier: workspace:*
+        version: link:../provider-replay
 
   packages/contracts:
     dependencies:
@@ -196,6 +214,9 @@ importers:
       '@pathsmith/provider-mock':
         specifier: workspace:*
         version: link:../provider-mock
+      '@pathsmith/provider-replay':
+        specifier: workspace:*
+        version: link:../provider-replay
       '@types/better-sqlite3':
         specifier: 9.6.0
         version: 9.6.0

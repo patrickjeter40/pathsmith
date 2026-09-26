@@ -104,7 +104,7 @@ test("migrations, revision conflicts, immutable snapshots, and workspace isolati
     storage = env.storage,
     data = seed(storage),
     { ctx, draft, workflowVersion } = data;
-  assert.equal(storage.schemaVersion, 1);
+  assert.equal(storage.schemaVersion, 2);
   assert.throws(() => openStorage({ dataDir: env.dataDir }), {
     code: "STORAGE_LOCKED",
   });
@@ -235,7 +235,7 @@ test("queue validation, foreign keys, incremental results, trace persistence, an
       report.scenarios.reduce((n, item) => n + item.events.length, 0),
     );
     assert.equal(
-      raw.prepare("SELECT count(*) AS count FROM provider_attempts").get()
+      raw.prepare("SELECT count(*) AS count FROM provider_exchanges").get()
         .count,
       report.scenarios.reduce((n, item) => n + item.exchanges.length, 0),
     );
@@ -310,5 +310,115 @@ test("a killed process releases the OS-held data-directory lock", async (t) => {
   const exited = once(child, "exit");
   child.kill("SIGKILL");
   await exited;
-  assert.equal(env.reopen().schemaVersion, 1);
+  assert.equal(env.reopen().schemaVersion, 2);
+});
+
+test("M4 migration preserves legacy exchange rows and immutable snapshot payloads", async (t) => {
+  const env = setup(t),
+    storage = env.storage,
+    seeded = seed(storage),
+    run = seeded.queue();
+  storage.claimNextRun(seeded.ctx);
+  const report = await execute(storage, run);
+  storage.finishRun(seeded.ctx, run.id, report);
+  storage.close();
+  const raw = new Database(join(env.dataDir, "pathsmith.sqlite"));
+  const snapshot = raw
+    .prepare("SELECT snapshot,report FROM runs WHERE id=?")
+    .get(run.id);
+  const exchanges = raw
+    .prepare(
+      "SELECT scenario_run_id,position,payload FROM provider_exchanges ORDER BY scenario_run_id,position",
+    )
+    .all();
+  try {
+    // Recreate the M2 table arrangement; its exchange payloads are preserved verbatim.
+    raw.exec("DROP TABLE provider_attempts");
+    raw.exec("ALTER TABLE provider_exchanges RENAME TO provider_attempts");
+    raw.prepare("DELETE FROM schema_migrations WHERE version=2").run();
+  } finally {
+    raw.close();
+  }
+  const migrated = env.reopen();
+  assert.equal(migrated.schemaVersion, 2);
+  const check = new Database(join(env.dataDir, "pathsmith.sqlite"), {
+    readonly: true,
+  });
+  try {
+    assert.deepEqual(
+      check.prepare("SELECT snapshot,report FROM runs WHERE id=?").get(run.id),
+      snapshot,
+    );
+    assert.deepEqual(
+      check
+        .prepare(
+          "SELECT scenario_run_id,position,payload FROM provider_exchanges ORDER BY scenario_run_id,position",
+        )
+        .all(),
+      exchanges,
+    );
+    assert.equal(
+      check.prepare("SELECT count(*) AS n FROM provider_attempts").get().n,
+      0,
+    );
+    assert.deepEqual(check.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally {
+    check.close();
+  }
+});
+
+test("M4 final reports reject changed mode, provenance, accounting and model metadata", async (t) => {
+  const env = setup(t),
+    storage = env.storage,
+    seeded = seed(storage),
+    run = seeded.queue();
+  storage.claimNextRun(seeded.ctx);
+  const report = await execute(storage, run);
+  for (const field of [
+    "mode",
+    "origin",
+    "source",
+    "limit",
+    "summary",
+    "status",
+    "adapter",
+    "models",
+    "mixed",
+  ]) {
+    const changed = structuredClone(report);
+    if (field === "mode") changed.mode = "live";
+    if (field === "origin") changed.origin = "live";
+    if (field === "source") changed.sourceRunId = "other-source";
+    if (field === "limit") changed.httpAttemptLimit = 201;
+    if (field === "summary") changed.summary.actualHttpAttempts = 1;
+    if (field === "status") changed.status = "failed";
+    if (field === "adapter")
+      Object.values(changed.adapters)[0].normalizerVersion = "other";
+    if (field === "models")
+      Object.values(changed.adapters)[0].resolvedModels = ["invented-model"];
+    if (field === "mixed") changed.mixedModel = true;
+    assert.throws(
+      () => storage.finishRun(seeded.ctx, run.id, changed),
+      { code: "INVALID_REQUEST" },
+      field,
+    );
+  }
+  const changed = structuredClone(report.scenarios[0]);
+  changed.actualHttpAttempts = 1;
+  assert.throws(
+    () => storage.appendScenarioResult(seeded.ctx, run.id, changed),
+    { code: "INVALID_REQUEST" },
+  );
+  storage.finishRun(seeded.ctx, run.id, report);
+  const raw = new Database(join(env.dataDir, "pathsmith.sqlite"), {
+    readonly: true,
+  });
+  try {
+    assert.equal(
+      raw.prepare("SELECT count(*) AS n FROM provider_attempts").get().n,
+      0,
+    );
+  } finally {
+    raw.close();
+  }
 });

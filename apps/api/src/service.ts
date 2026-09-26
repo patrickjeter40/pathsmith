@@ -12,6 +12,8 @@ import {
   PathsmithError,
   toExecutionError,
   type ExecutionLimits,
+  type ExecutionMode,
+  type Bindings,
 } from "@pathsmith/core";
 import {
   compareRuns,
@@ -22,15 +24,27 @@ import {
   type ScenarioResult,
 } from "@pathsmith/evaluation";
 import { createMockProvider } from "@pathsmith/provider-mock";
+import { createReplayBindings } from "@pathsmith/provider-replay";
+import { createJevProvider } from "@pathsmith/provider-jev";
 import {
   openStorage,
+  StorageError,
+  type QueueRunInput,
   type RunRecord,
   type PageOptions,
   type ScenarioRunRecord,
 } from "@pathsmith/storage";
 import { loadExample, loadFixtureSet } from "./examples.js";
 
+export interface ProviderConfiguration {
+  enableLive?: boolean;
+  apiKey?: string;
+  defaultModel?: string;
+  /** Server-only injection seam for network-free integration tests. */
+  fetch?: typeof globalThis.fetch;
+}
 export class LocalApplication implements OnModuleDestroy {
+  private readonly providerConfig: ProviderConfiguration;
   readonly storage;
   readonly context;
   private stopping = false;
@@ -38,7 +52,17 @@ export class LocalApplication implements OnModuleDestroy {
   private active: { id: string; controller: AbortController } | undefined;
   private running: Promise<void> | undefined;
   storageFailed = false;
-  constructor(dataDir?: string) {
+  constructor(dataDir?: string, providerConfig: ProviderConfiguration = {}) {
+    this.providerConfig = {
+      enableLive:
+        providerConfig.enableLive ?? process.env.PATHSMITH_ENABLE_LIVE === "1",
+      apiKey: providerConfig.apiKey ?? process.env.TYPESAFE_API_KEY ?? "",
+      defaultModel:
+        providerConfig.defaultModel ??
+        process.env.TYPESAFE_MODEL ??
+        "jev-latest",
+      ...(providerConfig.fetch ? { fetch: providerConfig.fetch } : {}),
+    };
     this.storage = openStorage({ dataDir });
     this.context = this.storage.localContext;
   }
@@ -85,28 +109,164 @@ export class LocalApplication implements OnModuleDestroy {
       profile: example.profile,
     };
   }
+  providerStatus() {
+    const configured = Boolean(this.providerConfig.apiKey?.trim());
+    const enabled = this.providerConfig.enableLive === true;
+    return {
+      allowedModes: [
+        "mock",
+        "replay",
+        ...(configured && enabled ? ["live"] : []),
+      ],
+      defaultMode: "mock",
+      defaultHttpAttemptLimit: 200,
+      maximumHttpAttemptLimit: 2000,
+      providers: [
+        { id: "mock", configured: true, defaultModel: "mock-v1" },
+        {
+          id: "jev",
+          configured,
+          enabled,
+          defaultModel: this.providerConfig.defaultModel,
+        },
+      ],
+    };
+  }
+  private liveAdapter() {
+    if (!this.providerConfig.enableLive)
+      throw new PathsmithError(
+        "LIVE_DISABLED",
+        "Live execution is not enabled on this server",
+      );
+    return createJevProvider({
+      apiKey: this.providerConfig.apiKey ?? "",
+      fetch: this.providerConfig.fetch,
+    });
+  }
   queue(input: {
     workflowVersionId: string;
     suiteVersionId: string;
-    fixtureSetId: string;
+    mode?: ExecutionMode;
+    fixtureSetId?: string;
+    sourceRunId?: string;
+    confirmLive?: boolean;
     profile?: ExecutionProfile;
     selectedScenarioIds?: string[];
     limits?: Partial<ExecutionLimits>;
     concurrency?: number;
+    httpAttemptLimit?: number;
   }) {
-    const fixtureSet = loadFixtureSet(input.fixtureSetId);
-    const run = this.storage.queueRun(this.context, {
+    const mode = input.mode ?? "mock";
+    const request: QueueRunInput = {
       workflowVersionId: input.workflowVersionId,
       suiteVersionId: input.suiteVersionId,
-      fixtures: fixtureSet.fixtures,
-      profile: input.profile ?? fixtureSet.profile,
       selectedScenarioIds: input.selectedScenarioIds,
       limits: input.limits,
       concurrency: input.concurrency,
-      mode: "mock",
-    });
+      httpAttemptLimit: input.httpAttemptLimit,
+      mode,
+    };
+    if (mode === "mock") {
+      if (
+        !input.fixtureSetId ||
+        input.sourceRunId !== undefined ||
+        input.confirmLive !== undefined
+      )
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Mock mode requires a fixture set only",
+        );
+      const fixtureSet = loadFixtureSet(input.fixtureSetId);
+      request.fixtures = fixtureSet.fixtures;
+      request.profile = input.profile ?? fixtureSet.profile;
+    } else if (mode === "replay") {
+      if (
+        !input.sourceRunId ||
+        input.fixtureSetId !== undefined ||
+        input.confirmLive !== undefined
+      )
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Replay requires a source run only",
+        );
+      request.sourceRunId = input.sourceRunId;
+      if (input.profile) request.profile = input.profile;
+    } else {
+      if (
+        input.confirmLive !== true ||
+        input.fixtureSetId !== undefined ||
+        input.sourceRunId !== undefined
+      )
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Live mode requires explicit confirmation and no mock or replay source",
+        );
+      const adapter = this.liveAdapter();
+      const workflow = this.storage.getWorkflowVersion(
+        this.context,
+        input.workflowVersionId,
+      );
+      request.profile = input.profile ?? {
+        formatVersion: "0.1",
+        bindings: Object.fromEntries(
+          workflow.definition.bindings.map((name) => [
+            name,
+            { providerId: "jev", model: this.providerConfig.defaultModel! },
+          ]),
+        ),
+      };
+      assertValid(
+        validateProfile(request.profile, workflow.definition),
+        "PROVIDER_NOT_CONFIGURED",
+      );
+      request.adapters = Object.fromEntries(
+        Object.entries(request.profile.bindings).map(([name, b]) => [
+          name,
+          {
+            providerId: adapter.id,
+            requestedModel: b.model,
+            adapterVersion: adapter.version,
+            normalizerVersion: adapter.normalizerVersion,
+            resolvedModels: [],
+          },
+        ]),
+      );
+      request.liveConfirmed = true;
+    }
+    const run = this.storage.queueRun(this.context, request);
     this.schedule();
     return this.view(run);
+  }
+  private bindings(run: RunRecord): Bindings {
+    const snapshot = run.snapshot;
+    if (snapshot.mode === "replay") {
+      const source = this.storage.getRun(this.context, snapshot.sourceRunId!);
+      if (!source.report || source.projectId !== run.projectId)
+        throw new StorageError(
+          "LIFECYCLE_CONFLICT",
+          "Replay source is unavailable",
+        );
+      return createReplayBindings(source.report);
+    }
+    const adapter =
+      snapshot.mode === "live"
+        ? this.liveAdapter()
+        : createMockProvider(snapshot.fixtures);
+    return Object.fromEntries(
+      Object.entries(snapshot.profile.bindings).map(([name, binding]) => [
+        name,
+        { ...binding, adapter },
+      ]),
+    );
+  }
+  exportRun(id: string) {
+    const run = this.storage.getRun(this.context, id);
+    if (!run.report)
+      throw new StorageError(
+        "LIFECYCLE_CONFLICT",
+        "Run has no final report to export",
+      );
+    return run.report;
   }
   private schedule() {
     if (this.stopping || this.scheduled || this.running) return;
@@ -130,18 +290,16 @@ export class LocalApplication implements OnModuleDestroy {
       const controller = new AbortController();
       this.active = { id: run.id, controller };
       try {
-        const snapshot = run.snapshot,
-          adapter = createMockProvider(snapshot.fixtures);
+        const snapshot = run.snapshot;
         const report = await runSuite({
           workflow: snapshot.workflow,
           suite: snapshot.suite,
-          mode: "mock",
-          bindings: Object.fromEntries(
-            Object.entries(snapshot.profile.bindings).map(([name, binding]) => [
-              name,
-              { ...binding, adapter },
-            ]),
-          ),
+          mode: snapshot.mode,
+          bindings: this.bindings(run),
+          sourceRunId: snapshot.sourceRunId ?? undefined,
+          sourceOrigin:
+            snapshot.mode === "replay" ? snapshot.origin : undefined,
+          httpAttemptLimit: snapshot.httpAttemptLimit ?? 200,
           selectedScenarioIds: snapshot.selectedScenarioIds,
           limits: snapshot.limits,
           concurrency: snapshot.concurrency,
@@ -216,6 +374,10 @@ export class LocalApplication implements OnModuleDestroy {
       completedAt: run.completedAt,
       mode: run.snapshot.mode,
       origin: run.snapshot.origin,
+      sourceRunId: run.snapshot.sourceRunId,
+      httpAttemptLimit: run.snapshot.httpAttemptLimit ?? 200,
+      mixedModel: run.report?.mixedModel ?? false,
+      adapters: run.report?.adapters ?? run.snapshot.adapters,
       workflowVersionId: run.snapshot.workflowVersionId,
       suiteVersionId: run.snapshot.suiteVersionId,
       workflowName: run.snapshot.workflow.name,
@@ -258,6 +420,8 @@ export class LocalApplication implements OnModuleDestroy {
       concurrency: run.snapshot.concurrency,
       mode: run.snapshot.mode,
       origin: run.snapshot.origin,
+      sourceRunId: run.snapshot.sourceRunId,
+      httpAttemptLimit: run.snapshot.httpAttemptLimit ?? 200,
       runtimeVersion: run.snapshot.runtimeVersion,
       adapters: run.report?.adapters ?? run.snapshot.adapters,
     });

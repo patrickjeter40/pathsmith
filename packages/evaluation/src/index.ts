@@ -22,6 +22,10 @@ import {
   resolveLimits,
   RUNTIME_VERSION,
   snapshotBindings,
+  sumUsage,
+  type Usage,
+  type ProviderAttemptRecord,
+  type ExecutionMode,
   toExecutionError,
   workflowHashes,
   type Bindings,
@@ -55,9 +59,11 @@ export interface ScenarioResult {
   actualHttpAttempts: number;
   replayedJudgments: number;
   elapsedMs: number;
-  usage: null;
+  usage: Usage | null;
+  historicalUsage: Usage | null;
   events: TraceEvent[];
   exchanges: Exchange[];
+  attempts: ProviderAttemptRecord[];
   outputs: Record<string, Json>;
 }
 export function evaluateAssertions(
@@ -224,8 +230,9 @@ export function summarize(
     executionCompletionRate: ratio(completed, selected),
     logicalJudgments: scenarios.reduce((s, r) => s + r.logicalJudgments, 0),
     actualHttpAttempts: scenarios.reduce((s, r) => s + r.actualHttpAttempts, 0),
-    replayedJudgments: 0,
-    usage: null,
+    replayedJudgments: scenarios.reduce((s, r) => s + r.replayedJudgments, 0),
+    usage: sumUsage(scenarios.map((s) => s.usage)),
+    historicalUsage: sumUsage(scenarios.map((s) => s.historicalUsage ?? null)),
     outcomeCounts,
   };
 }
@@ -236,9 +243,9 @@ export interface RunReport {
   workspaceId: string;
   projectId: string;
   status: "completed" | "failed" | "canceled";
-  mode: "mock";
-  origin: "synthetic";
-  sourceRunId: null;
+  mode: ExecutionMode;
+  origin: "synthetic" | "live";
+  sourceRunId: string | null;
   createdAt: string;
   completedAt: string;
   runtimeVersion: string;
@@ -247,6 +254,7 @@ export interface RunReport {
   profile: ExecutionProfile;
   limits: ExecutionLimits;
   concurrency: number;
+  httpAttemptLimit: number;
   workflowSemanticHash: string;
   artifactHash: string;
   suiteSnapshotHash: string;
@@ -271,10 +279,16 @@ export interface RunSuiteOptions {
   workflow: Workflow;
   suite: Suite;
   bindings: Bindings;
-  mode: "mock";
+  mode: ExecutionMode;
+  /** Required for replay with an empty binding profile; otherwise derived and checked. */
+  sourceRunId?: string;
+  /** Preserve source provenance when replay has no provider bindings to carry it. */
+  sourceOrigin?: "synthetic" | "live";
   selectedScenarioIds?: string[];
   limits?: Partial<ExecutionLimits>;
   concurrency?: number;
+  /** Explicit override of the default 200; maximum 2,000 is a Pathsmith cap. */
+  httpAttemptLimit?: number;
   signal?: AbortSignal;
   workspaceId?: string;
   projectId?: string;
@@ -288,22 +302,76 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     "SUITE_INVALID",
   );
   const limits = resolveLimits(options.limits),
-    concurrency = options.concurrency ?? 16;
+    concurrency = options.concurrency ?? (options.mode === "live" ? 4 : 16);
+  const httpAttemptLimit = options.httpAttemptLimit ?? 200;
+  if (
+    !Number.isSafeInteger(httpAttemptLimit) ||
+    httpAttemptLimit < 1 ||
+    httpAttemptLimit > 2000
+  )
+    throw new PathsmithError(
+      "RUN_LIMIT_EXCEEDED",
+      "HTTP attempt limit must be an integer from 1 through 2,000",
+    );
+  const httpAttemptBudget = { remaining: httpAttemptLimit };
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16)
     throw new PathsmithError(
       "RUN_LIMIT_EXCEEDED",
-      "Mock concurrency must be between 1 and 16",
+      "Scenario concurrency must be between 1 and 16",
     );
-  if (options.mode !== "mock")
+  if (!["mock", "replay", "live"].includes(options.mode))
     throw new PathsmithError(
       "PROVIDER_NOT_CONFIGURED",
-      "Only mock mode is implemented in M1",
+      "A supported explicit execution mode is required",
     );
   const workflow = immutable(options.workflow),
     suite = immutable(options.suite),
     id = options.runId ?? randomUUID(),
     createdAt = new Date().toISOString(),
     bindings = snapshotBindings(options.bindings);
+  const sourceRunIds = [
+    ...new Set([
+      ...(options.sourceRunId ? [options.sourceRunId] : []),
+      ...Object.values(bindings).flatMap((b) =>
+        b.adapter.replay ? [b.adapter.replay.sourceRunId] : [],
+      ),
+    ]),
+  ];
+  if (options.mode === "replay" && sourceRunIds.length !== 1)
+    throw new PathsmithError(
+      "PROVIDER_NOT_CONFIGURED",
+      "Replay requires bindings from exactly one source run",
+    );
+  if (
+    options.sourceOrigin !== undefined &&
+    (options.mode !== "replay" ||
+      !["synthetic", "live"].includes(options.sourceOrigin))
+  )
+    throw new PathsmithError(
+      "PROVIDER_NOT_CONFIGURED",
+      "Source origin is valid only for recorded replay",
+    );
+  const replayOrigins = [
+    ...new Set([
+      ...(options.sourceOrigin ? [options.sourceOrigin] : []),
+      ...Object.values(bindings).map((b) => b.adapter.origin),
+    ]),
+  ];
+  if (
+    options.mode === "replay" &&
+    (replayOrigins.length !== 1 ||
+      !["synthetic", "live"].includes(replayOrigins[0]))
+  )
+    throw new PathsmithError(
+      "PROVIDER_NOT_CONFIGURED",
+      "Replay requires one consistent source origin; empty bindings require sourceOrigin",
+    );
+  const origin =
+    options.mode === "replay"
+      ? replayOrigins[0]
+      : options.mode === "live"
+        ? "live"
+        : "synthetic";
   const profile: ExecutionProfile = {
     formatVersion: "0.1",
     bindings: Object.fromEntries(
@@ -336,6 +404,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         input: scenario.input,
         bindings,
         mode: options.mode,
+        httpAttemptBudget,
         runId: id,
         scenarioId: scenario.id,
         limits,
@@ -358,8 +427,10 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         replayedJudgments: execution.replayedJudgments,
         elapsedMs: execution.elapsedMs,
         usage: execution.usage,
+        historicalUsage: execution.historicalUsage,
         events: execution.events,
         exchanges: execution.exchanges,
+        attempts: execution.attempts,
         outputs: execution.outputs,
       };
       const itemBytes = byteLength(item, MAX_REPORT_BYTES);
@@ -383,11 +454,13 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
           selectedEdges: item.selectedEdges,
           logicalJudgments: item.logicalJudgments,
           actualHttpAttempts: item.actualHttpAttempts,
-          replayedJudgments: 0,
+          replayedJudgments: item.replayedJudgments,
           elapsedMs: item.elapsedMs,
-          usage: null,
+          usage: item.usage,
+          historicalUsage: item.historicalUsage,
           events: [],
           exchanges: [],
+          attempts: item.attempts,
           outputs: {},
         };
       } else reportBytes += itemBytes;
@@ -436,9 +509,12 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         actualHttpAttempts: 0,
         replayedJudgments: 0,
         elapsedMs: 0,
-        usage: null,
+        usage:
+          options.mode !== "mock" ? { inputTokens: 0, outputTokens: 0 } : null,
+        historicalUsage: null,
         events: [],
         exchanges: [],
+        attempts: [],
         outputs: {},
       },
   );
@@ -475,9 +551,9 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         : scenarios.some((s) => s.status === "canceled")
           ? "canceled"
           : "completed",
-    mode: "mock",
-    origin: "synthetic",
-    sourceRunId: null,
+    mode: options.mode,
+    origin,
+    sourceRunId: options.mode === "replay" ? sourceRunIds[0] : null,
     createdAt,
     completedAt: new Date().toISOString(),
     runtimeVersion: RUNTIME_VERSION,
@@ -486,6 +562,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     profile,
     limits,
     concurrency,
+    httpAttemptLimit,
     ...workflowHashes(workflow),
     suiteSnapshotHash: hash(suite),
     selectedScenarioIds,

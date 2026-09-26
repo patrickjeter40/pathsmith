@@ -20,6 +20,8 @@
     "@pathsmith/contracts": "workspace:*",
     "@pathsmith/core": "workspace:*",
     "@pathsmith/evaluation": "workspace:*",
-    "@pathsmith/provider-mock": "workspace:*"
+    "@pathsmith/provider-jev": "workspace:*",
+    "@pathsmith/provider-mock": "workspace:*",
+    "@pathsmith/provider-replay": "workspace:*"
   }
 }

@@ -22,10 +22,18 @@ import {
   workflowHashes,
   resolveLimits,
   RUNTIME_VERSION,
+  validUsage,
+  requestFingerprint,
   type ExecutionError,
 } from "@pathsmith/core";
 import { createMockProvider } from "@pathsmith/provider-mock";
-import type { RunReport, ScenarioResult } from "@pathsmith/evaluation";
+import {
+  summarize,
+  coverage,
+  type RunReport,
+  type ScenarioResult,
+} from "@pathsmith/evaluation";
+import { createReplayBindings } from "@pathsmith/provider-replay";
 import { migrate } from "./migrations.js";
 import type {
   WorkspaceContext,
@@ -487,8 +495,9 @@ export class SqliteStorage {
         "NOT_FOUND",
         "Versions do not belong to the same project",
       );
-    if (input.mode !== undefined && input.mode !== "mock")
-      throw new StorageError("INVALID_REQUEST", "Only mock runs are available");
+    const mode = input.mode ?? "mock";
+    if (!["mock", "live", "replay"].includes(mode))
+      throw new StorageError("INVALID_REQUEST", "Unknown execution mode");
     assertValid(validateWorkflow(workflow.definition));
     assertValid(
       validateSuite(
@@ -498,12 +507,8 @@ export class SqliteStorage {
       ),
       "SUITE_INVALID",
     );
-    assertValid(
-      validateProfile(input.profile, workflow.definition),
-      "PROVIDER_NOT_CONFIGURED",
-    );
-    const adapter = createMockProvider(input.fixtures),
-      concurrency = input.concurrency ?? 16;
+    const concurrency = input.concurrency ?? (mode === "live" ? 4 : 16);
+    const httpAttemptLimit = input.httpAttemptLimit ?? 200;
     if (
       !Number.isSafeInteger(concurrency) ||
       concurrency < 1 ||
@@ -514,14 +519,140 @@ export class SqliteStorage {
         "Concurrency must be between 1 and 16",
       );
     if (
-      Object.values(input.profile.bindings).some(
-        (binding) => binding.providerId !== "mock",
-      )
+      !Number.isSafeInteger(httpAttemptLimit) ||
+      httpAttemptLimit < 1 ||
+      httpAttemptLimit > 2000
     )
       throw new StorageError(
         "INVALID_REQUEST",
-        "All bindings must select the mock provider",
+        "HTTP attempt limit must be between 1 and 2,000",
       );
+    let profile = input.profile;
+    let adapters: RunReport["adapters"];
+    let origin: RunSnapshot["origin"] = mode === "live" ? "live" : "synthetic";
+    let sourceRunId: string | null = null;
+    if (mode === "replay") {
+      if (
+        !input.sourceRunId ||
+        input.fixtures !== undefined ||
+        input.liveConfirmed
+      )
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Replay requires a saved source run and no live confirmation or mock fixtures",
+        );
+      const source = this.getRun(ctx, input.sourceRunId);
+      if (source.projectId !== workflow.projectId)
+        throw new StorageError(
+          "NOT_FOUND",
+          "Source run does not belong to this project",
+        );
+      if (!source.report)
+        throw new StorageError(
+          "LIFECYCLE_CONFLICT",
+          "Replay source has no final recording",
+        );
+      createReplayBindings(source.report);
+      if (profile && hash(profile) !== hash(source.report.profile))
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Replay profile conflicts with the source recording",
+        );
+      profile = source.report.profile;
+      adapters = source.report.adapters;
+      origin = source.report.origin;
+      sourceRunId = source.id;
+    } else {
+      if (input.sourceRunId !== undefined)
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Only replay may reference a source run",
+        );
+      assertValid(
+        validateProfile(profile, workflow.definition),
+        "PROVIDER_NOT_CONFIGURED",
+      );
+      if (mode === "mock") {
+        if (input.liveConfirmed)
+          throw new StorageError(
+            "INVALID_REQUEST",
+            "Mock runs cannot include live confirmation",
+          );
+        const adapter = createMockProvider(input.fixtures);
+        adapters = Object.fromEntries(
+          Object.entries(profile!.bindings).map(([name, binding]) => [
+            name,
+            {
+              providerId: binding.providerId,
+              requestedModel: binding.model,
+              adapterVersion: adapter.version,
+              normalizerVersion: adapter.normalizerVersion,
+              resolvedModels: [],
+            },
+          ]),
+        );
+      } else {
+        if (
+          input.fixtures !== undefined ||
+          input.liveConfirmed !== true ||
+          !input.adapters
+        )
+          throw new StorageError(
+            "INVALID_REQUEST",
+            "Live runs require explicit confirmation and server adapter metadata",
+          );
+        adapters = input.adapters;
+      }
+      if (
+        Object.values(profile!.bindings).some(
+          (b) => b.providerId !== (mode === "mock" ? "mock" : "jev"),
+        )
+      )
+        throw new StorageError(
+          "INVALID_REQUEST",
+          "Binding provider does not match the execution mode",
+        );
+    }
+    assertValid(
+      validateProfile(profile, workflow.definition),
+      "PROVIDER_NOT_CONFIGURED",
+    );
+    if (
+      hash(Object.keys(adapters).sort()) !==
+      hash(Object.keys(profile!.bindings).sort())
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Adapter metadata does not match bindings",
+      );
+    // Keep only the public identity fields; adapter instances and credentials never enter snapshots.
+    adapters = Object.fromEntries(
+      Object.entries(profile!.bindings).map(([name, binding]) => {
+        const adapter = adapters[name];
+        if (
+          !adapter ||
+          adapter.providerId !== binding.providerId ||
+          adapter.requestedModel !== binding.model ||
+          ![adapter.adapterVersion, adapter.normalizerVersion].every(
+            (v) => typeof v === "string" && v.length > 0 && v.length <= 128,
+          ) ||
+          !Array.isArray(adapter.resolvedModels) ||
+          adapter.resolvedModels.some((v) => typeof v !== "string") ||
+          (mode !== "replay" && adapter.resolvedModels.length)
+        )
+          throw new StorageError("INVALID_REQUEST", "Invalid adapter metadata");
+        return [
+          name,
+          {
+            providerId: adapter.providerId,
+            requestedModel: adapter.requestedModel,
+            adapterVersion: adapter.adapterVersion,
+            normalizerVersion: adapter.normalizerVersion,
+            resolvedModels: adapter.resolvedModels,
+          },
+        ];
+      }),
+    );
     const snapshot: RunSnapshot = {
       workflowVersionId: workflow.id,
       suiteVersionId: suite.id,
@@ -531,7 +662,7 @@ export class SqliteStorage {
       artifactHash: workflow.artifactHash,
       workflowSemanticHash: workflow.workflowSemanticHash,
       suiteSnapshotHash: suite.suiteSnapshotHash,
-      profile: input.profile,
+      profile: profile!,
       limits: resolveLimits(input.limits),
       selectedScenarioIds: (
         input.selectedScenarioIds ??
@@ -540,27 +671,18 @@ export class SqliteStorage {
         .slice()
         .sort(),
       concurrency,
-      mode: "mock",
-      origin: "synthetic",
-      sourceRunId: null,
+      mode,
+      origin,
+      sourceRunId,
+      httpAttemptLimit,
+      liveConfirmed: mode === "live",
       runtimeVersion: RUNTIME_VERSION,
-      fixtures: input.fixtures,
-      adapters: Object.fromEntries(
-        Object.entries(input.profile.bindings).map(([name, binding]) => [
-          name,
-          {
-            providerId: binding.providerId,
-            requestedModel: binding.model,
-            adapterVersion: adapter.version,
-            normalizerVersion: adapter.normalizerVersion,
-            resolvedModels: [],
-          },
-        ]),
-      ),
+      ...(mode === "mock" ? { fixtures: input.fixtures } : {}),
+      adapters,
     };
     const id = randomUUID();
     this.db.run(
-      sql`INSERT INTO runs(id,workspace_id,project_id,workflow_version_id,suite_version_id,status,created_at,snapshot) VALUES (${id},${ctx.workspaceId},${workflow.projectId},${workflow.id},${suite.id},'queued',${now()},${encode(snapshot)})`,
+      sql`INSERT INTO runs(id,workspace_id,project_id,workflow_version_id,suite_version_id,source_run_id,status,created_at,snapshot) VALUES (${id},${ctx.workspaceId},${workflow.projectId},${workflow.id},${suite.id},${sourceRunId},'queued',${now()},${encode(snapshot)})`,
     );
     return this.getRun(ctx, id);
   }
@@ -698,6 +820,59 @@ export class SqliteStorage {
         "INVALID_REQUEST",
         "Exchange scope differs from its run",
       );
+    const attempts = result.attempts ?? [];
+    if (
+      result.actualHttpAttempts !== attempts.length ||
+      attempts.some(
+        (a) =>
+          !["succeeded", "failed", "canceled"].includes(a.status) ||
+          !Number.isSafeInteger(a.attempt) ||
+          a.attempt < 1 ||
+          a.attempt > 3 ||
+          !validUsage(a.usage) ||
+          !run.snapshot.workflow.nodes.some(
+            (n) =>
+              n.id === a.nodeId &&
+              n.kind === "judgment" &&
+              n.binding === a.binding,
+          ),
+      ) ||
+      (run.snapshot.mode !== "live" && attempts.length !== 0) ||
+      (run.snapshot.mode === "replay" &&
+        result.replayedJudgments !== result.exchanges.length) ||
+      (run.snapshot.mode !== "replay" && result.replayedJudgments !== 0)
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Attempt accounting does not match the run mode",
+      );
+    if (
+      result.exchanges.some((exchange) => {
+        const identity = run.snapshot.adapters[exchange.binding];
+        return (
+          !identity ||
+          exchange.providerId !== identity.providerId ||
+          exchange.adapterVersion !== identity.adapterVersion ||
+          exchange.normalizerVersion !== identity.normalizerVersion ||
+          exchange.request.model !== identity.requestedModel ||
+          exchange.origin !== run.snapshot.origin ||
+          exchange.fingerprint !==
+            requestFingerprint(
+              {
+                providerId: identity.providerId,
+                adapterVersion: identity.adapterVersion,
+                normalizerVersion: identity.normalizerVersion,
+              },
+              exchange.request,
+            ) ||
+          (exchange.sourceRunId ?? null) !== run.snapshot.sourceRunId
+        );
+      })
+    )
+      throw new StorageError(
+        "INVALID_REQUEST",
+        "Exchange provenance does not match the run snapshot",
+      );
     const id = randomUUID();
     this.db.transaction((tx) => {
       tx.run(
@@ -707,9 +882,13 @@ export class SqliteStorage {
         tx.run(
           sql`INSERT INTO node_traces VALUES (${id},${event.sequence},${encode(event)})`,
         );
+      for (const [index, attempt] of (result.attempts ?? []).entries())
+        tx.run(
+          sql`INSERT INTO provider_attempts VALUES (${id},${index},${encode(attempt)})`,
+        );
       for (const [index, exchange] of result.exchanges.entries())
         tx.run(
-          sql`INSERT INTO provider_attempts VALUES (${id},${index},${encode(exchange)})`,
+          sql`INSERT INTO provider_exchanges VALUES (${id},${index},${encode(exchange)})`,
         );
     });
     return {
@@ -739,6 +918,55 @@ export class SqliteStorage {
       hash(report.selectedScenarioIds) !== hash(snapshot.selectedScenarioIds) ||
       report.concurrency !== snapshot.concurrency ||
       report.mode !== snapshot.mode ||
+      report.origin !== snapshot.origin ||
+      report.sourceRunId !== snapshot.sourceRunId ||
+      report.runtimeVersion !== snapshot.runtimeVersion ||
+      report.httpAttemptLimit !== (snapshot.httpAttemptLimit ?? 200) ||
+      report.summary.actualHttpAttempts > (snapshot.httpAttemptLimit ?? 200) ||
+      report.status !==
+        (report.error || report.scenarios.some((s) => s.status === "failed")
+          ? "failed"
+          : report.scenarios.some((s) => s.status === "canceled")
+            ? "canceled"
+            : "completed") ||
+      hash(report.summary) !==
+        hash(
+          summarize(
+            snapshot.suite,
+            snapshot.selectedScenarioIds,
+            report.scenarios,
+          ),
+        ) ||
+      hash(report.coverage) !==
+        hash(coverage(snapshot.workflow, report.scenarios)) ||
+      hash(Object.keys(report.adapters).sort()) !==
+        hash(Object.keys(snapshot.adapters).sort()) ||
+      Object.entries(snapshot.adapters).some(([name, original]) => {
+        const actual = report.adapters[name];
+        return (
+          !actual ||
+          actual.providerId !== original.providerId ||
+          actual.requestedModel !== original.requestedModel ||
+          actual.adapterVersion !== original.adapterVersion ||
+          actual.normalizerVersion !== original.normalizerVersion ||
+          hash(actual.resolvedModels) !==
+            hash(
+              [
+                ...new Set(
+                  report.scenarios.flatMap((s) =>
+                    s.exchanges
+                      .filter((e) => e.binding === name)
+                      .map((e) => e.response.model),
+                  ),
+                ),
+              ].sort(),
+            )
+        );
+      }) ||
+      report.mixedModel !==
+        Object.values(report.adapters).some(
+          (a) => a.resolvedModels.length > 1,
+        ) ||
       report.scenarios.length !== snapshot.selectedScenarioIds.length ||
       new Set(report.scenarios.map((item) => item.scenarioId)).size !==
         report.scenarios.length
@@ -824,7 +1052,11 @@ export class SqliteStorage {
         "LIFECYCLE_CONFLICT",
         "Cancel the active run before deleting it",
       );
-    if (this.db.get(sql`SELECT 1 FROM runs WHERE source_run_id=${id}`))
+    if (
+      this.db.get(
+        sql`SELECT 1 FROM runs WHERE workspace_id=${ctx.workspaceId} AND source_run_id=${id}`,
+      )
+    )
       throw new StorageError(
         "LIFECYCLE_CONFLICT",
         "Delete dependent replay runs first",

@@ -7,7 +7,11 @@ import { join } from "node:path";
 import { createApi } from "../apps/api/dist/app.js";
 test("Nest built API: local health, origin/host/mutation/body limits, sanitized errors", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pathsmith-api-controls-"));
-  const app = await createApi({ port: 0, dataDir });
+  const app = await createApi({
+    port: 0,
+    dataDir,
+    providerConfig: { enableLive: false, apiKey: "" },
+  });
   try {
     const url = await app.getUrl();
     let response = await fetch(`${url}/api/v1/health`);
@@ -15,7 +19,7 @@ test("Nest built API: local health, origin/host/mutation/body limits, sanitized 
     assert.equal(response.headers.get("cache-control"), "no-store");
     const health = await response.json();
     assert.equal(health.database.status, "ready");
-    assert.equal(health.database.schemaVersion, 1);
+    assert.equal(health.database.schemaVersion, 2);
     const hostile = await new Promise((resolve, reject) => {
       const req = request(
         `${url}/api/v1/health`,
@@ -68,7 +72,7 @@ test("Nest built API: local health, origin/host/mutation/body limits, sanitized 
     assert.equal(response.status, 413);
     response = await fetch(`${url}/api/v1/providers/status`);
     const status = await response.json();
-    assert.deepEqual(status.allowedModes, ["mock"]);
+    assert.deepEqual(status.allowedModes, ["mock", "replay"]);
     assert(!JSON.stringify(status).includes("TYPESAFE_API_KEY"));
     response = await fetch(`${url}/api/v1/unknown`);
     assert.equal(response.status, 404);

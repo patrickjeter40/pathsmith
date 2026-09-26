@@ -19,8 +19,13 @@ import {
   type ExecutionError,
 } from "./error.js";
 import { evaluateExpression, type ExpressionStep } from "./expression.js";
-import { hash, workflowHashes } from "./hash.js";
+import { workflowHashes } from "./hash.js";
+import { requestFingerprint, sumUsage } from "./provider.js";
 import type {
+  Usage,
+  ProviderAttemptRecord,
+  HttpAttemptBudget,
+  ExecutionMode,
   Bindings,
   EvaluationRequest,
   EvaluationResponse,
@@ -78,10 +83,12 @@ interface ExecutionBase {
   logicalJudgments: number;
   actualHttpAttempts: number;
   replayedJudgments: number;
-  usage: null;
+  usage: Usage | null;
+  historicalUsage: Usage | null;
   elapsedMs: number;
   events: TraceEvent[];
   exchanges: Exchange[];
+  attempts: ProviderAttemptRecord[];
   observerErrors: number;
   workflowSemanticHash: string;
   artifactHash: string;
@@ -95,7 +102,9 @@ export interface ExecuteOptions {
   workflow: Workflow;
   input: Json;
   bindings: Bindings;
-  mode: "mock";
+  mode: ExecutionMode;
+  /** Shared by suite workers; reserved synchronously immediately before HTTP dispatch. */
+  httpAttemptBudget?: HttpAttemptBudget;
   runId?: string;
   scenarioId?: string | null;
   signal?: AbortSignal;
@@ -118,6 +127,7 @@ export function snapshotBindings(bindings: Bindings): Bindings {
           version: b.adapter.version,
           normalizerVersion: b.adapter.normalizerVersion,
           origin: b.adapter.origin,
+          ...(b.adapter.replay ? { replay: immutable(b.adapter.replay) } : {}),
           evaluate: b.adapter.evaluate.bind(b.adapter),
         }),
       }),
@@ -136,10 +146,10 @@ export async function executeWorkflow(
   );
   if (byteLength(options.input) > 64 * 1024)
     throw new PathsmithError("INPUT_INVALID", "Input exceeds 64 KiB");
-  if (options.mode !== "mock")
+  if (!["mock", "replay", "live"].includes(options.mode))
     throw new PathsmithError(
       "PROVIDER_NOT_CONFIGURED",
-      "This milestone supports mock execution only",
+      "A supported explicit execution mode is required",
     );
   const workflow = immutable(options.workflow),
     input = immutable(options.input),
@@ -155,17 +165,36 @@ export async function executeWorkflow(
     ),
   };
   assertValid(validateProfile(profile, workflow), "PROVIDER_NOT_CONFIGURED");
+  if (
+    options.mode === "replay" &&
+    new Set(
+      Object.values(bindings).flatMap((b) =>
+        b.adapter.replay ? [b.adapter.replay.sourceRunId] : [],
+      ),
+    ).size > 1
+  )
+    throw new PathsmithError(
+      "PROVIDER_NOT_CONFIGURED",
+      "Replay bindings must belong to one source run",
+    );
   for (const node of workflow.nodes)
     if (node.kind === "judgment") {
       const b = bindings[node.binding];
       if (
         b.adapter.id !== b.providerId ||
-        b.adapter.origin !== "synthetic" ||
-        b.providerId !== "mock"
+        (options.mode === "mock" &&
+          (b.adapter.origin !== "synthetic" ||
+            b.providerId !== "mock" ||
+            b.adapter.replay !== undefined)) ||
+        (options.mode === "replay" && !b.adapter.replay?.sourceRunId) ||
+        (options.mode === "live" &&
+          (b.providerId !== "jev" ||
+            b.adapter.origin !== "live" ||
+            b.adapter.replay !== undefined))
       )
         throw new PathsmithError(
           "PROVIDER_NOT_CONFIGURED",
-          "Mock mode requires an explicit synthetic mock adapter",
+          "Execution mode and provider adapter do not match",
         );
     }
   const runId = options.runId ?? randomUUID(),
@@ -175,7 +204,19 @@ export async function executeWorkflow(
     visitedNodes: string[] = [],
     selectedEdges: string[] = [],
     events: TraceEvent[] = [],
-    exchanges: Exchange[] = [];
+    exchanges: Exchange[] = [],
+    attempts: ProviderAttemptRecord[] = [];
+  const attemptBudget = options.httpAttemptBudget ?? { remaining: 200 };
+  if (
+    !Number.isSafeInteger(attemptBudget.remaining) ||
+    attemptBudget.remaining < 0 ||
+    attemptBudget.remaining > 2000
+  )
+    throw new PathsmithError(
+      "RUN_LIMIT_EXCEEDED",
+      "Invalid shared HTTP attempt budget",
+    );
+  let acceptingAttempts = true;
   let logicalJudgments = 0,
     sequence = 0,
     observerErrors = 0,
@@ -253,12 +294,24 @@ export async function executeWorkflow(
     visitedNodes,
     selectedEdges,
     logicalJudgments,
-    actualHttpAttempts: 0,
-    replayedJudgments: 0,
-    usage: null,
+    actualHttpAttempts: attempts.length,
+    replayedJudgments: options.mode === "replay" ? exchanges.length : 0,
+    usage:
+      options.mode === "replay"
+        ? { inputTokens: 0, outputTokens: 0 }
+        : options.mode === "live"
+          ? attempts.length
+            ? sumUsage(attempts.map((a) => a.usage))
+            : { inputTokens: 0, outputTokens: 0 }
+          : null,
+    historicalUsage:
+      options.mode === "replay"
+        ? sumUsage(exchanges.map((e) => e.historicalUsage ?? null))
+        : null,
     elapsedMs: performance.now() - started,
     events,
     exchanges,
+    attempts,
     observerErrors,
     ...workflowHashes(workflow),
   });
@@ -296,18 +349,22 @@ export async function executeWorkflow(
         };
         reserve(resolvedRequest, limits.providerRequestBytes);
         const request = immutable(resolvedRequest);
-        const fingerprint = hash({
-          providerId: binding.providerId,
-          adapterVersion: binding.adapter.version,
-          normalizerVersion: binding.adapter.normalizerVersion,
+        const fingerprint = requestFingerprint(
+          {
+            providerId: binding.providerId,
+            adapterVersion: binding.adapter.version,
+            normalizerVersion: binding.adapter.normalizerVersion,
+          },
           request,
-        });
+        );
         emit("judgment_request_resolved", {
           request,
           fingerprint,
           binding: node.binding,
         });
         const callStarted = performance.now();
+        const callAttempts: ProviderAttemptRecord[] = [];
+        const bindingName = node.binding;
         const response = await withAbort(
           binding.adapter.evaluate(request, {
             signal: controller.signal,
@@ -315,13 +372,97 @@ export async function executeWorkflow(
             scenarioId,
             nodeId: node.id,
             binding: node.binding,
+            requestFingerprint: fingerprint,
+            sourceRunId: binding.adapter.replay?.sourceRunId ?? null,
+            deadlineAt:
+              Date.now() +
+              Math.max(
+                0,
+                limits.scenarioDeadlineMs - (performance.now() - started),
+              ),
+            responseByteLimit: limits.providerResponseBytes,
+            onAttemptStarted(attempt) {
+              check();
+              if (
+                !acceptingAttempts ||
+                options.mode !== "live" ||
+                attempt !== callAttempts.length + 1 ||
+                attempt > 3
+              )
+                throw new PathsmithError(
+                  "PROVIDER_INVALID_RESPONSE",
+                  "Invalid provider attempt sequence",
+                );
+              if (attemptBudget.remaining <= 0)
+                throw new PathsmithError(
+                  "RUN_LIMIT_EXCEEDED",
+                  "Total HTTP attempt budget exhausted",
+                );
+              const record: ProviderAttemptRecord = {
+                attempt,
+                status: "in_flight",
+                httpStatus: null,
+                errorCode: null,
+                elapsedMs: 0,
+                usage: null,
+                requestedModel: request.model,
+                resolvedModel: null,
+                nodeId: node.id,
+                binding: bindingName,
+                fingerprint,
+              };
+              reserve(record);
+              emit("provider_attempt_started", record);
+              attemptBudget.remaining--;
+              attempts.push(record);
+              callAttempts.push(record);
+            },
+            onAttemptFinished(info) {
+              if (!acceptingAttempts) return;
+              const record = callAttempts[info.attempt - 1];
+              if (
+                !record ||
+                record.status !== "in_flight" ||
+                !validUsage(info.usage)
+              )
+                throw new PathsmithError(
+                  "PROVIDER_INVALID_RESPONSE",
+                  "Invalid provider attempt accounting",
+                );
+              reserve(info, limits.providerResponseBytes);
+              Object.assign(record, immutable(info));
+              emit("provider_attempt_finished", record);
+            },
           }),
           controller.signal,
         );
         check();
         validateResponse(request, response, limits.providerResponseBytes);
+        if (options.mode === "mock" && response.usage !== null)
+          throw new PathsmithError(
+            "PROVIDER_INVALID_RESPONSE",
+            "Synthetic mock responses must not report billed usage",
+          );
         reserve(response, limits.providerResponseBytes);
+        if (
+          options.mode === "live" &&
+          (!callAttempts.length ||
+            callAttempts.some((a) => a.status === "in_flight"))
+        )
+          throw new PathsmithError(
+            "PROVIDER_INVALID_RESPONSE",
+            "Live adapter omitted transport accounting",
+          );
         const saved = immutable(response);
+        const usage =
+          options.mode === "live"
+            ? sumUsage(callAttempts.map((a) => a.usage))
+            : options.mode === "replay"
+              ? { inputTokens: 0, outputTokens: 0 }
+              : null;
+        const historicalUsage = Object.hasOwn(saved, "historicalUsage")
+          ? saved.historicalUsage!
+          : saved.usage;
         outputs[node.id] = saved.answers as unknown as Json;
         exchanges.push({
           runId,
@@ -336,15 +477,24 @@ export async function executeWorkflow(
           request,
           response: saved,
           elapsedMs: performance.now() - callStarted,
-          actualHttpAttempts: 0,
+          actualHttpAttempts: callAttempts.length,
+          usage,
+          ...(binding.adapter.replay
+            ? {
+                sourceRunId: binding.adapter.replay.sourceRunId,
+                historicalUsage,
+              }
+            : {}),
         });
         emit("judgment_completed", {
           answers: saved.answers,
           requestedModel: request.model,
           resolvedModel: saved.model,
           origin: binding.adapter.origin,
-          usage: saved.usage,
-          actualHttpAttempts: 0,
+          usage,
+          historicalUsage: options.mode === "replay" ? historicalUsage : null,
+          sourceRunId: binding.adapter.replay?.sourceRunId ?? null,
+          actualHttpAttempts: callAttempts.length,
         });
       } else if (node.kind === "transform") {
         const value = evaluate(node.value);
@@ -421,6 +571,16 @@ export async function executeWorkflow(
         scenarioId ?? undefined,
       ),
       status = failure.code === "RUN_CANCELED" ? "canceled" : "failed";
+    acceptingAttempts = false;
+    for (const attempt of attempts.filter((a) => a.status === "in_flight")) {
+      attempt.status = status === "canceled" ? "canceled" : "failed";
+      attempt.errorCode = failure.code;
+      try {
+        emit("provider_attempt_finished", attempt, attempt.nodeId);
+      } catch {
+        /* original failure wins */
+      }
+    }
     // Observation failures do not retry judgments, including failures while emitting terminal events.
     try {
       emit("node_failed", failure);
@@ -430,6 +590,7 @@ export async function executeWorkflow(
     }
     return immutable({ ...base(), status, error: failure });
   } finally {
+    acceptingAttempts = false;
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", cancel);
   }
@@ -453,7 +614,7 @@ async function withAbort<T>(
     signal.removeEventListener("abort", listener);
   }
 }
-function validateResponse(
+export function validateResponse(
   request: EvaluationRequest,
   response: EvaluationResponse,
   limit: number,
@@ -467,14 +628,29 @@ function validateResponse(
     !response ||
     typeof response.model !== "string" ||
     !response.model.trim() ||
-    response.usage !== null
+    !validUsage(response.usage) ||
+    (Object.hasOwn(response, "historicalUsage") &&
+      !validUsage(response.historicalUsage))
   )
     throw new PathsmithError(
       "PROVIDER_INVALID_RESPONSE",
-      "Mock responses require a model and null usage",
+      "Responses require a model and valid usage (or null when unknown)",
     );
   assertValid(
     validateAnswers(request.questions, response.answers),
     "PROVIDER_INVALID_RESPONSE",
+  );
+}
+
+export function validUsage(usage: unknown): usage is Usage | null {
+  if (usage === null) return true;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return false;
+  const value = usage as Usage;
+  return (
+    Object.keys(value).length === 2 &&
+    Number.isSafeInteger(value.inputTokens) &&
+    value.inputTokens >= 0 &&
+    Number.isSafeInteger(value.outputTokens) &&
+    value.outputTokens >= 0
   );
 }

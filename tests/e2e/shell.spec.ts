@@ -374,6 +374,130 @@ test("branch threshold edit compares two regressions and one improvement", async
   expect(errors).toEqual([]);
 });
 
+test("saved recording replays a threshold change offline and survives restart", async ({ page }) => {
+  const errors = await openIsolated(page);
+  await page.getByLabel("Example to load").selectOption("support-baseline");
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await expect(page.getByText("Loaded Support routing — baseline as a persisted project.")).toBeVisible();
+  const projectId = await page.getByLabel("Saved project").inputValue();
+  await page.getByRole("button", { name: "Run full suite" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  const sourceId = await page.getByLabel("Baseline run").locator("option").nth(1).getAttribute("value");
+  expect(sourceId).toBeTruthy();
+  await page.locator(".react-flow__node", { hasText: "confidence_gate" }).first().click();
+  await page.getByLabel("Case 1 literal value").fill("0.8");
+  await page.getByRole("button", { name: "Save workflow draft" }).click();
+  await page.getByRole("button", { name: "Publish workflow" }).click();
+  await expect(page.getByText(/Workflow version .* published/)).toBeVisible();
+  await page.getByLabel("Execution mode").selectOption("replay");
+  await page.getByLabel("Replay source run").selectOption(sourceId!);
+  await expect(page.locator(".run-mode-panel")).toContainText("zero new provider requests");
+  await page.getByRole("button", { name: "Run full suite" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  await expect(page.locator(".run-details")).toContainText("0 current HTTP attempts");
+  await expect(page.locator(".run-details")).toContainText("Recorded replay source:");
+  const candidateId = await page.getByLabel("Candidate run").locator("option").nth(1).getAttribute("value");
+  await page.getByLabel("Baseline run").selectOption(sourceId!);
+  await page.getByLabel("Candidate run").selectOption(candidateId!);
+  await page.getByRole("button", { name: "Compare runs" }).click();
+  await expect(page.locator(".comparison-metrics")).toContainText("2 new assertion regressions");
+  await expect(page.locator(".comparison-metrics")).toContainText("1 assertion improvements");
+  await expect(page.locator(".comparison-report")).toContainText("Recorded Replay / synthetic");
+  await page.reload();
+  await expect(page.locator(".sidebar-footer")).toContainText("API ready");
+  await page.getByLabel("Saved project").selectOption(projectId);
+  await page.locator(".history button").filter({ hasText: candidateId!.slice(0, 8) }).click();
+  await expect(page.locator(".run-details")).toContainText(`Recorded replay source: ${sourceId}`);
+  await expect(page.locator(".run-details")).toContainText("0 current HTTP attempts");
+  expect(errors).toEqual([]);
+});
+
+test("canceled partial history entry remains selectable as a replay source", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await expect(page.getByText("Loaded Gaming as a persisted project.")).toBeVisible();
+  const projectId = await page.getByLabel("Saved project").inputValue();
+  await page.getByRole("button", { name: "Run selected case" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  const sourceId = await page.getByLabel("Baseline run").locator("option").nth(1).getAttribute("value");
+  expect(sourceId).toBeTruthy();
+  // Alter only the history response to exercise the selector's canceled status.
+  // The saved source report remains real and the replay request still reaches the API.
+  await page.route("**/api/v1/runs?*", async (route) => {
+    const source = new URL(route.request().url());
+    const response = await route.fetch({ url: `${apiUrl}${source.pathname}${source.search}` });
+    const pageData = await response.json() as { items: { id: string; status: string; progress: { persisted: number; selected: number } }[]; total: number };
+    await route.fulfill({ response, json: {
+      ...pageData,
+      items: pageData.items.map((item) => item.id === sourceId ? { ...item, status: "canceled", progress: { ...item.progress, persisted: 1, selected: 2 } } : item),
+    } });
+  });
+  await page.reload();
+  await page.getByLabel("Saved project").selectOption(projectId);
+  await page.getByLabel("Execution mode").selectOption("replay");
+  const choice = page.getByLabel("Replay source run").locator(`option[value="${sourceId}"]`);
+  await expect(choice).toContainText("canceled (partial: 1/2 saved)");
+  await page.getByLabel("Replay source run").selectOption(sourceId!);
+  await page.getByRole("button", { name: "Run selected case" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  await expect(page.locator(".run-details")).toContainText(`Recorded replay source: ${sourceId}`);
+});
+
+test("live mode stays unavailable without server credentials and requires consent", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await expect(page.getByText("Loaded Gaming as a persisted project.")).toBeVisible();
+  const status = await directApi<{ providers: { id: string; configured: boolean; enabled?: boolean }[] }>("/providers/status");
+  expect(status.providers.find((item) => item.id === "jev")?.configured).toBe(false);
+  await page.getByLabel("Execution mode").selectOption("live");
+  await expect(page.getByText("Live Jev preflight")).toBeVisible();
+  await expect(page.locator(".live-preflight")).toContainText("Scenario state and question text leave this computer");
+  await expect(page.locator(".live-preflight")).toContainText("Longest judgment path");
+  await expect(page.getByRole("alert")).toContainText("Live mode is unavailable");
+  await expect(page.getByLabel("Confirm live run")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Run full suite" })).toBeDisabled();
+  const html = await page.content();
+  expect(html).not.toContain("TYPESAFE_API_KEY");
+  expect(JSON.stringify(status)).not.toContain("apiKey");
+  await page.route("**/api/v1/providers/status", async (route) => {
+    await route.fulfill({ json: {
+      allowedModes: ["mock", "replay", "live"], defaultMode: "mock",
+      defaultHttpAttemptLimit: 200, maximumHttpAttemptLimit: 2000,
+      providers: [{ id: "mock", configured: true, defaultModel: "mock-v1" }, { id: "jev", configured: true, enabled: true, defaultModel: "jev-test" }],
+    } });
+  });
+  const projectId = await page.getByLabel("Saved project").inputValue();
+  await page.reload();
+  await page.getByLabel("Saved project").selectOption(projectId);
+  await page.getByLabel("Execution mode").selectOption("live");
+  await expect(page.locator(".live-preflight")).toContainText("jev-test");
+  await expect(page.getByRole("button", { name: "Run full suite" })).toBeDisabled();
+  await page.getByLabel("Confirm live run").check();
+  await expect(page.getByRole("button", { name: "Run full suite" })).toBeEnabled();
+  await page.getByLabel("Execution mode").selectOption("mock");
+  await page.getByLabel("Execution mode").selectOption("live");
+  await expect(page.getByLabel("Confirm live run")).not.toBeChecked();
+});
+
+test("full run export requires sensitive data acknowledgement", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Load checked example" }).click();
+  await page.getByRole("button", { name: "Run selected case" }).click();
+  await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
+  await expect(page.locator(".export-warning")).toContainText("scenario inputs, questions, model responses");
+  await expect(page.getByRole("button", { name: "Export full run JSON" })).toBeDisabled();
+  await page.getByLabel("Acknowledge sensitive run export").check();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export full run JSON" }).click();
+  const download = await downloadPromise;
+  const report = JSON.parse(await readFile((await download.path())!, "utf8"));
+  expect(report.artifactType).toBe("pathsmith_run");
+  expect(report.mode).toBe("mock");
+  expect(report.scenarios).toHaveLength(1);
+  expect(JSON.stringify(report)).not.toContain("TYPESAFE_API_KEY");
+  await expect(page.getByRole("button", { name: "Export full run JSON" })).toBeDisabled();
+});
+
 test("new graph nodes remain editable while incomplete and undo restores canonical JSON", async ({ page }) => {
   await openIsolated(page);
   await page.getByRole("button", { name: "Add node" }).click();

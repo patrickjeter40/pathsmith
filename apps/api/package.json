@@ -15,7 +15,9 @@
     "@pathsmith/contracts": "workspace:*",
     "@pathsmith/core": "workspace:*",
     "@pathsmith/evaluation": "workspace:*",
+    "@pathsmith/provider-jev": "workspace:*",
     "@pathsmith/provider-mock": "workspace:*",
+    "@pathsmith/provider-replay": "workspace:*",
     "@pathsmith/storage": "workspace:*",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2"

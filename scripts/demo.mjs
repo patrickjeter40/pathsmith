@@ -39,6 +39,28 @@ const commands = [
     "--out",
     `${directory}/comparison.json`,
   ],
+  [
+    "run",
+    "--workflow",
+    "examples/support-routing/candidate.workflow.json",
+    "--suite",
+    "examples/support-routing/suite.json",
+    "--mode",
+    "replay",
+    "--source",
+    `${directory}/baseline.json`,
+    "--out",
+    `${directory}/candidate-replay.json`,
+  ],
+  [
+    "compare",
+    "--baseline",
+    `${directory}/baseline.json`,
+    "--candidate",
+    `${directory}/candidate-replay.json`,
+    "--out",
+    `${directory}/replay-comparison.json`,
+  ],
 ];
 for (const args of commands) {
   const result = spawnSync(
@@ -53,5 +75,5 @@ for (const args of commands) {
   console.log(`${args[0]}: expected exit ${expected}`);
 }
 console.log(
-  `Actual reports written to ${directory}. Both suites intentionally contain assertion failures.`,
+  `Actual reports written to ${directory}. Mock and recorded replay were compared. Both workflow versions intentionally contain assertion failures.`,
 );

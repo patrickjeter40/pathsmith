@@ -7,6 +7,7 @@ import { join } from "node:path";
 const cli = (...args) =>
   spawnSync(process.execPath, ["packages/cli/dist/index.js", ...args], {
     encoding: "utf8",
+    env: { ...process.env, TYPESAFE_API_KEY: "", PATHSMITH_ENABLE_LIVE: "" },
   });
 test("CLI validate/run/compare write reports before their expected exit codes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pathsmith-cli-"));

@@ -15,7 +15,7 @@ import {
   type ExecutionProfile,
   type Workflow,
 } from "@pathsmith/contracts";
-import type { ExecutionLimits } from "@pathsmith/core";
+import type { ExecutionLimits, ExecutionMode } from "@pathsmith/core";
 import { LocalApplication } from "./service.js";
 import {
   badRequest,
@@ -38,7 +38,7 @@ export class ApiController {
     return {
       service: "pathsmith",
       status: this.local.storageFailed ? "degraded" : "ready",
-      milestone: "M3",
+      milestone: "M4",
       database: {
         status: this.local.storageFailed ? "error" : "ready",
         schemaVersion: this.local.storage.schemaVersion,
@@ -46,14 +46,7 @@ export class ApiController {
     };
   }
   @Get("providers/status") providers() {
-    return {
-      allowedModes: ["mock"],
-      defaultMode: "mock",
-      providers: [
-        { id: "mock", configured: true, defaultModel: "mock-v1" },
-        { id: "jev", configured: false, implementation: "deferred-to-M4" },
-      ],
-    };
+    return this.local.providerStatus();
   }
   @Get("examples") examples() {
     return listExamples();
@@ -247,10 +240,45 @@ export class ApiController {
         "selectedScenarioIds",
         "limits",
         "concurrency",
+        "sourceRunId",
+        "confirmLive",
+        "httpAttemptLimit",
       ],
-      ["workflowVersionId", "suiteVersionId", "fixtureSetId", "mode"],
+      ["workflowVersionId", "suiteVersionId"],
     );
-    if (body.mode !== "mock") badRequest("Only mock mode is implemented");
+    const mode = body.mode ?? "mock";
+    if (!["mock", "replay", "live"].includes(mode as string))
+      badRequest("Unknown execution mode");
+    if (
+      mode === "mock" &&
+      (body.fixtureSetId === undefined ||
+        body.sourceRunId !== undefined ||
+        body.confirmLive !== undefined)
+    )
+      badRequest("Mock mode requires a fixture set only");
+    if (
+      mode === "replay" &&
+      (body.sourceRunId === undefined ||
+        body.fixtureSetId !== undefined ||
+        body.confirmLive !== undefined)
+    )
+      badRequest("Replay requires a source run only");
+    if (
+      mode === "live" &&
+      (body.confirmLive !== true ||
+        body.fixtureSetId !== undefined ||
+        body.sourceRunId !== undefined)
+    )
+      badRequest(
+        "Live mode requires explicit confirmation and no fixture or replay source",
+      );
+    if (
+      body.httpAttemptLimit !== undefined &&
+      (!Number.isSafeInteger(body.httpAttemptLimit) ||
+        (body.httpAttemptLimit as number) < 1 ||
+        (body.httpAttemptLimit as number) > 2000)
+    )
+      badRequest("HTTP attempt limit must be between 1 and 2,000");
     if (body.profile !== undefined)
       envelope(
         body.profile,
@@ -276,7 +304,17 @@ export class ApiController {
     return this.local.queue({
       workflowVersionId: identifier(body.workflowVersionId),
       suiteVersionId: identifier(body.suiteVersionId),
-      fixtureSetId: identifier(body.fixtureSetId),
+      mode: mode as ExecutionMode,
+      fixtureSetId:
+        body.fixtureSetId !== undefined
+          ? identifier(body.fixtureSetId)
+          : undefined,
+      sourceRunId:
+        body.sourceRunId !== undefined
+          ? identifier(body.sourceRunId)
+          : undefined,
+      confirmLive: body.confirmLive as boolean | undefined,
+      httpAttemptLimit: body.httpAttemptLimit as number | undefined,
       profile: body.profile as unknown as ExecutionProfile | undefined,
       limits: body.limits as Partial<ExecutionLimits> | undefined,
       selectedScenarioIds: selection(body.selectedScenarioIds),
@@ -321,6 +359,9 @@ export class ApiController {
     return this.local.view(
       this.local.storage.getRun(this.local.context, identifier(id)),
     );
+  }
+  @Get("runs/:id/export") exportRun(@Param("id") id: string) {
+    return this.local.exportRun(identifier(id));
   }
   @Get("runs/:id/snapshot") snapshot(@Param("id") id: string) {
     return this.local.snapshot(identifier(id));

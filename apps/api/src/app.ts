@@ -17,7 +17,7 @@ import { byteLength, inspectJson } from "@pathsmith/contracts";
 import { PathsmithError } from "@pathsmith/core";
 import { StorageError } from "@pathsmith/storage";
 import { ApiController } from "./controller.js";
-import { LocalApplication } from "./service.js";
+import { LocalApplication, type ProviderConfiguration } from "./service.js";
 
 @Module({})
 class AppModule {}
@@ -121,7 +121,12 @@ function requestBudget(request: Request): number {
 }
 
 export async function createApi(
-  options: { host?: string; port?: number; dataDir?: string } = {},
+  options: {
+    host?: string;
+    port?: number;
+    dataDir?: string;
+    providerConfig?: ProviderConfiguration;
+  } = {},
 ) {
   const host = options.host ?? process.env.PATHSMITH_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.PATHSMITH_PORT ?? 4310);
@@ -131,6 +136,7 @@ export async function createApi(
     throw new Error("Invalid local API port");
   const local = new LocalApplication(
     options.dataDir ?? process.env.PATHSMITH_DATA_DIR,
+    options.providerConfig,
   );
   let app: NestExpressApplication | undefined;
   try {

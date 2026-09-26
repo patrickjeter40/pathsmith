@@ -23,11 +23,24 @@ type Draft<T> = {
 type Version = { id: string; draftRevision: number; createdAt: string };
 type Example = { id: string; name: string; fixtureSetId: string };
 type Page<T> = { items: T[]; total: number };
+type ProviderStatus = {
+  allowedModes: string[];
+  defaultMode: string;
+  defaultHttpAttemptLimit: number;
+  maximumHttpAttemptLimit: number;
+  providers: { id: string; configured: boolean; enabled?: boolean; defaultModel?: string }[];
+};
+type Usage = { inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null } | null;
 type Run = {
   id: string;
   projectId: string;
   status: string;
   mode: string;
+  origin: "synthetic" | "live";
+  sourceRunId: string | null;
+  httpAttemptLimit: number;
+  mixedModel: boolean;
+  adapters?: Record<string, { providerId: string; requestedModel: string; resolvedModels: string[] }>;
   workflowName: string;
   suiteName: string;
   workflowVersionId: string;
@@ -50,6 +63,9 @@ type Run = {
     assertionFailed: number;
     logicalJudgments: number;
     actualHttpAttempts: number;
+    replayedJudgments: number;
+    usage: Usage;
+    historicalUsage: Usage;
   };
   error?: { code: string; message: string } | null;
 };
@@ -80,6 +96,7 @@ type Snapshot = {
   profile: unknown;
   mode: string;
   origin: string;
+  adapters?: Record<string, { providerId: string; requestedModel: string; resolvedModels: string[] }>;
 };
 type ComparisonCase = {
   scenarioId: string;
@@ -132,6 +149,29 @@ async function api<T>(
 const pretty = (value: unknown) => JSON.stringify(value, null, 2);
 const finalStatus = (status: string) =>
   ["completed", "failed", "canceled", "interrupted"].includes(status);
+const modeLabel = (mode: string) => mode === "replay" ? "Recorded Replay" : mode === "live" ? "Live Jev" : "Mock";
+function longestJudgmentPath(workflow: Workflow): number {
+  const outgoing = new Map<string, string[]>();
+  for (const edge of workflow.edges) outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
+  const nodes = new Map(workflow.nodes.map((node) => [node.id, node]));
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>();
+  const count = (id: string): number => {
+    if (memo.has(id)) return memo.get(id)!;
+    if (visiting.has(id)) throw new Error("Published workflow contains a cycle");
+    visiting.add(id);
+    const next = Math.max(0, ...(outgoing.get(id) ?? []).map(count));
+    visiting.delete(id);
+    const result = (nodes.get(id)?.kind === "judgment" ? 1 : 0) + next;
+    memo.set(id, result);
+    return result;
+  };
+  return count(workflow.nodes.find((node) => node.kind === "start")?.id ?? "");
+}
+function usageLabel(usage: Usage): string {
+  if (!usage) return "unknown";
+  return `input ${usage.inputTokens ?? "unknown"}, output ${usage.outputTokens ?? "unknown"}, total ${usage.totalTokens ?? "unknown"} tokens`;
+}
 function graphable(value: unknown): value is Workflow {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
@@ -173,6 +213,15 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [conflict, setConflict] = useState("");
   const [busy, setBusy] = useState(false);
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [runMode, setRunMode] = useState<"mock" | "replay" | "live">("mock");
+  const [sourceRunId, setSourceRunId] = useState("");
+  const [liveConsent, setLiveConsent] = useState(false);
+  const [liveConcurrency, setLiveConcurrency] = useState(4);
+  const [httpAttemptLimit, setHttpAttemptLimit] = useState(200);
+  const [preflight, setPreflight] = useState<{ scenarios: number; model: string; maxJudgments: number; maxLogicalCalls: number; maxAttempts: number } | null>(null);
+  const [preflightError, setPreflightError] = useState("");
+  const [exportAcknowledged, setExportAcknowledged] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [comparisonRuns, setComparisonRuns] = useState<Run[]>([]);
   const [runTotal, setRunTotal] = useState(0);
@@ -209,17 +258,38 @@ export default function App() {
       api<unknown>("/health"),
       api<Example[]>("/examples"),
       api<Project[]>("/projects"),
+      api<ProviderStatus>("/providers/status"),
     ])
-      .then(([, catalog, saved]) => {
+      .then(([, catalog, saved, status]) => {
         setHealth("API ready");
         setExamples(catalog);
         setProjects(saved);
+        setProviderStatus(status);
+        setHttpAttemptLimit(status.defaultHttpAttemptLimit);
       })
       .catch((error) => {
         setHealth("API unavailable");
         setMessage(String(error));
       });
   }, []);
+  useEffect(() => {
+    if (runMode !== "live" || !workflowVersionId || !suiteVersionId) {
+      setPreflight(null); setPreflightError(""); return;
+    }
+    let active = true;
+    setPreflight(null); setPreflightError("");
+    void Promise.all([
+      api<Workflow>(`/workflow-versions/${workflowVersionId}/export`),
+      api<{ definition: Suite }>(`/suite-versions/${suiteVersionId}`),
+    ]).then(([published, version]) => {
+      if (!active) return;
+      const scenarios = version.definition.scenarios.length;
+      const maxJudgments = longestJudgmentPath(published);
+      const maxLogicalCalls = scenarios * maxJudgments;
+      setPreflight({ scenarios, model: providerStatus?.providers.find((item) => item.id === "jev")?.defaultModel ?? "unknown", maxJudgments, maxLogicalCalls, maxAttempts: maxLogicalCalls * 3 });
+    }).catch((error) => { if (active) setPreflightError(String(error)); });
+    return () => { active = false; };
+  }, [runMode, workflowVersionId, suiteVersionId, providerStatus]);
   async function refreshProjects() {
     setProjects(await api<Project[]>("/projects"));
   }
@@ -284,6 +354,7 @@ export default function App() {
       ]);
       if (projectRequest.current !== generation) return;
       setProjectId(id);
+      setRunMode("mock"); setSourceRunId(""); setLiveConsent(false); setExportAcknowledged(false);
       setWorkflowDraft(fullW);
       setSuiteDraft(fullS);
       setText(pretty(fullW.definition));
@@ -491,18 +562,23 @@ export default function App() {
   }
   async function startRun(single: boolean) {
     if (!projectId || !workflowVersionId || !suiteVersionId) return;
+    if (runMode === "live" && (!liveConsent || !providerStatus?.allowedModes.includes("live") || !preflight)) return;
+    if (runMode === "replay" && !sourceRunId) return;
     setMessage("");
     try {
       const queued = await api<Run>("/runs", "POST", {
         workflowVersionId,
         suiteVersionId,
-        fixtureSetId,
-        mode: "mock",
+        mode: runMode,
+        ...(runMode === "mock" ? { fixtureSetId } : {}),
+        ...(runMode === "replay" ? { sourceRunId } : {}),
+        ...(runMode === "live" ? { confirmLive: true, concurrency: liveConcurrency, httpAttemptLimit } : {}),
         ...(single ? { selectedScenarioIds: [selectedCase] } : {}),
       });
+      if (runMode === "live") setLiveConsent(false);
       await refreshRuns(projectId, queued.id);
       setMessage(
-        `Queued exact-mock ${single ? "case" : "suite"} run. Edits after publication are not included.`,
+        `Queued ${modeLabel(runMode)} ${single ? "case" : "suite"} run. Edits after publication are not included.`,
       );
     } catch (error) {
       setMessage(String(error));
@@ -515,6 +591,7 @@ export default function App() {
     const projectGeneration = projectRequest.current;
     if (changed) {
       setRun(null);
+      setExportAcknowledged(false);
       casePageCount.current = 100;
       traceSelection.current = "";
       traceRequest.current++;
@@ -561,6 +638,17 @@ export default function App() {
     } catch (error) {
       setMessage(String(error));
     }
+  }
+  async function exportRun() {
+    if (!run || !exportAcknowledged || !finalStatus(run.status)) return;
+    try {
+      const report = await api<unknown>(`/runs/${run.id}/export`);
+      const url = URL.createObjectURL(new Blob([pretty(report)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = `${run.id}.pathsmith-run.json`; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExportAcknowledged(false);
+    } catch (error) { setMessage(String(error)); }
   }
   async function showTrace(id: string) {
     traceSelection.current = id;
@@ -672,7 +760,7 @@ export default function App() {
         <div className="sidebar-footer">
           <span className="dot" />
           {health}
-          <p>M3 · visual authoring and comparisons</p>
+          <p>M4 · recorded replay and live provider controls</p>
         </div>
       </aside>
       <main>
@@ -685,7 +773,7 @@ export default function App() {
             </span>
             <h1>Inspect the decision path.</h1>
           </div>
-          <span className="mode">● MOCK · OFFLINE</span>
+          <span className={`mode mode-${runMode}`}>● {modeLabel(runMode).toUpperCase()}{runMode === "mock" ? " · OFFLINE" : runMode === "replay" ? " · NO NEW HTTP" : " · EXTERNAL REQUESTS"}</span>
         </header>
         <section className="m2-panel" id="projects">
           <div className="section-heading">
@@ -933,20 +1021,18 @@ export default function App() {
         <section className="m2-panel" id="runs">
           <div className="section-heading">
             <div>
-              <span className="eyebrow">EXACT MOCK · IMMUTABLE VERSIONS</span>
+              <span className="eyebrow">IMMUTABLE VERSIONS · EXPLICIT EXECUTION MODE</span>
               <h2>Run and inspect</h2>
             </div>
             <div className="row">
               <button
-                disabled={
-                  !suiteVersionId || !workflowVersionId || !selectedCase
-                }
+                disabled={!suiteVersionId || !workflowVersionId || !selectedCase || runMode === "replay" && !sourceRunId || runMode === "live" && (!providerStatus?.allowedModes.includes("live") || !liveConsent || !preflight)}
                 onClick={() => void startRun(true)}
               >
                 Run selected case
               </button>
               <button
-                disabled={!suiteVersionId || !workflowVersionId}
+                disabled={!suiteVersionId || !workflowVersionId || runMode === "replay" && !sourceRunId || runMode === "live" && (!providerStatus?.allowedModes.includes("live") || !liveConsent || !preflight)}
                 onClick={() => void startRun(false)}
               >
                 Run full suite
@@ -982,7 +1068,10 @@ export default function App() {
                 ))}
               </select>
             </label>
-            <label>
+            <label>Execution mode<select aria-label="Execution mode" value={runMode} onChange={(event) => { setRunMode(event.target.value as "mock" | "replay" | "live"); setLiveConsent(false); }}>
+              <option value="mock">Mock (offline)</option><option value="replay">Recorded Replay (offline)</option><option value="live">Live Jev</option>
+            </select></label>
+            {runMode === "mock" && <label>
               Exact fixture set{" "}
               <select
                 aria-label="Exact fixture set"
@@ -999,9 +1088,24 @@ export default function App() {
                   </option>
                 ))}
               </select>
-            </label>
-            <span className="hint">Mode: mock only.</span>
+            </label>}
           </div>
+          {runMode === "replay" && <div className="run-mode-panel">
+            <label>Source run from this project<select aria-label="Replay source run" value={sourceRunId} onChange={(event) => setSourceRunId(event.target.value)}><option value="">Select a saved recording</option>{runs.filter((item) => ["completed", "failed", "canceled"].includes(item.status)).map((item) => <option key={item.id} value={item.id}>{modeLabel(item.mode)} · {item.status}{item.status === "canceled" ? ` (partial: ${item.progress.persisted}/${item.progress.selected} saved)` : ""} · {item.id.slice(0, 8)} · {new Date(item.createdAt).toLocaleString()}</option>)}</select></label>
+            <p className="hint">The source recording supplies the provider profile and exact responses. Canceled runs are usable only if a final recording was saved; the server verifies this. Missing requests fail with REPLAY_MISS. Replay sends zero new provider requests.</p>
+            {sourceRunId && <p className="hint">Source provenance: {modeLabel(runs.find((item) => item.id === sourceRunId)?.mode ?? "mock")} · {runs.find((item) => item.id === sourceRunId)?.origin ?? "synthetic"}.</p>}
+          </div>}
+          {runMode === "live" && <div className="run-mode-panel live-preflight">
+            <strong>Live Jev preflight</strong>
+            <p className="notice conflict">Scenario state and question text leave this computer. Provider usage may be billed. No exact token or dollar cost is available before execution.</p>
+            {!providerStatus?.allowedModes.includes("live") && <p role="alert">Live mode is unavailable: the server needs both an enabled live flag and a configured Jev API key.</p>}
+            {preflightError && <p role="alert">Preflight failed: {preflightError}</p>}
+            {preflight && <p>Published suite: {preflight.scenarios} scenarios (selected case: 1) · Provider/model: Jev / {preflight.model} · Longest judgment path: {preflight.maxJudgments} calls per scenario · Full suite upper bound: {preflight.maxLogicalCalls} logical calls, {preflight.maxAttempts} HTTP attempts at 3 per judgment · Selected case upper bound: {preflight.maxJudgments} logical calls, {preflight.maxJudgments * 3} attempts.</p>}
+            {preflight && preflight.maxAttempts > httpAttemptLimit && <p className="notice conflict">The full suite conservative upper bound exceeds the configured attempt budget. Execution may stop when that budget is exhausted.</p>}
+            <div className="row"><label>Live request concurrency<input aria-label="Live request concurrency" type="number" min={1} max={4} value={liveConcurrency} onChange={(event) => setLiveConcurrency(Math.max(1, Math.min(4, Number(event.target.value) || 1)))} /></label><label>Maximum HTTP attempts<input aria-label="Maximum HTTP attempts" type="number" min={1} max={providerStatus?.maximumHttpAttemptLimit ?? 2000} value={httpAttemptLimit} onChange={(event) => setHttpAttemptLimit(Math.max(1, Math.min(providerStatus?.maximumHttpAttemptLimit ?? 2000, Number(event.target.value) || 1)))} /></label></div>
+            <p className="hint">At most 4 live requests are in flight process-wide. The attempt budget bounds dispatch; token totals depend on provider responses.</p>
+            <label className="check"><input type="checkbox" aria-label="Confirm live run" checked={liveConsent} disabled={!providerStatus?.allowedModes.includes("live") || !preflight} onChange={(event) => setLiveConsent(event.target.checked)} /> I consent to sending the selected scenario data and questions to Jev and possible usage charges.</label>
+          </div>}
           <h3>Run history</h3>
           {runs.length === 0 ? (
             <p className="hint">No runs in this project yet.</p>
@@ -1013,7 +1117,7 @@ export default function App() {
                   className={run?.id === item.id ? "selected-run" : ""}
                   onClick={() => void openRun(item.id)}
                 >
-                  <strong>{item.status}</strong> ·{" "}
+                  <span className={`mode mode-${item.mode}`}>{modeLabel(item.mode)}</span> <strong>{item.status}</strong> ·{" "}
                   {new Date(item.createdAt).toLocaleString()} ·{" "}
                   {item.progress.persisted}/{item.progress.selected} persisted ·{" "}
                   {item.id.slice(0, 8)}
@@ -1042,10 +1146,13 @@ export default function App() {
                 )}
               </div>
               <p className="hint">
-                {run.mode} · {snapshot?.origin ?? "synthetic"} · workflow{" "}
+                <span className={`mode mode-${run.mode}`}>{modeLabel(run.mode)}</span> · {run.origin} · workflow{" "}
                 {run.workflowVersionId.slice(0, 8)} · suite{" "}
                 {run.suiteVersionId.slice(0, 8)}
               </p>
+              {run.sourceRunId && <p className="hint">Recorded replay source: {run.sourceRunId} · source origin {run.origin}. These outcomes are conditional on saved responses.</p>}
+              {run.mixedModel && <p className="notice conflict" role="alert">Mixed resolved model versions were observed. Review provenance before interpreting comparisons; an unqualified gate is blocked.</p>}
+              {(run.adapters ?? snapshot?.adapters) && <div className="provenance"><strong>Provider provenance</strong>{Object.entries(run.adapters ?? snapshot?.adapters ?? {}).map(([binding, adapter]) => <p key={binding}>{binding}: {adapter.providerId} · requested {adapter.requestedModel} · resolved {adapter.resolvedModels?.length ? adapter.resolvedModels.join(", ") : "unknown until response"}</p>)}</div>}
               <p>
                 {run.progress.persisted}/{run.progress.selected} persisted ·{" "}
                 {run.progress.pending} pending · {run.summary.completed}{" "}
@@ -1058,8 +1165,10 @@ export default function App() {
                 {run.summary.assertionPassed} assertion passes ·{" "}
                 {run.summary.assertionFailed} assertion failures ·{" "}
                 {run.summary.logicalJudgments} logical judgments ·{" "}
-                {run.summary.actualHttpAttempts} HTTP attempts
+                {run.summary.actualHttpAttempts} current HTTP attempts · {run.summary.replayedJudgments ?? 0} replayed judgments
               </p>
+              <p>Current provider usage: {run.mode === "replay" ? "0 tokens (no new provider usage)" : usageLabel(run.summary.usage)} · Historical source usage: {usageLabel(run.summary.historicalUsage)}. Historical usage is excluded from current usage.</p>
+              <p className="hint">Configured HTTP attempt budget: {run.httpAttemptLimit}. Unknown usage remains unknown.</p>
               {run.error && (
                 <p role="alert">
                   {run.error.code}: {run.error.message}
@@ -1071,6 +1180,7 @@ export default function App() {
                   passed.
                 </p>
               )}
+              {finalStatus(run.status) && <div className="export-warning"><p className="notice conflict">Full run export may contain scenario inputs, questions, model responses, traces, and replay provenance. Local storage is not application-level encrypted. Review the destination before sharing.</p><label className="check"><input type="checkbox" aria-label="Acknowledge sensitive run export" checked={exportAcknowledged} onChange={(event) => setExportAcknowledged(event.target.checked)} /> I understand this export may contain sensitive data.</label><button disabled={!exportAcknowledged} onClick={() => void exportRun()}>Export full run JSON</button></div>}
               <details>
                 <summary>Immutable workflow and suite snapshot</summary>
                 <pre>
@@ -1112,6 +1222,7 @@ export default function App() {
               {selectedCaseRun && (
                 <div className="trace">
                   <h3>Saved case trace</h3>
+                  {caseRuns.find((item) => item.id === selectedCaseRun)?.result.error && <p className="notice conflict" role="alert">{caseRuns.find((item) => item.id === selectedCaseRun)?.result.error?.code}: {caseRuns.find((item) => item.id === selectedCaseRun)?.result.error?.message}. Inspect the saved trace for the node and exact request details.</p>}
                   <pre>{trace ? pretty(trace) : "Loading trace…"}</pre>
                 </div>
               )}
@@ -1142,6 +1253,7 @@ export default function App() {
           {comparison && <div className="comparison-report">
             <div className="section-heading"><h3>Gate: <strong className={`gate-${comparison.gate}`}>{comparison.gate}</strong></h3><span className="hint">Baseline {comparison.baselineStatus} · Candidate {comparison.candidateStatus}</span></div>
             <p className="hint">Run IDs: {comparison.baselineRunId} → {comparison.candidateRunId} · Strict gate: {String(comparison.policy.strict)} · Accept mixed model: {String(comparison.policy.acceptMixedModel)}</p>
+            <p className="hint">Baseline: {modeLabel(comparisonRuns.find((item) => item.id === comparison.baselineRunId)?.mode ?? "mock")} / {comparisonRuns.find((item) => item.id === comparison.baselineRunId)?.origin ?? "unknown"} · Candidate: {modeLabel(comparisonRuns.find((item) => item.id === comparison.candidateRunId)?.mode ?? "mock")} / {comparisonRuns.find((item) => item.id === comparison.candidateRunId)?.origin ?? "unknown"}. Replay preserves source provenance.</p>
             <div className="comparison-metrics"><span>{comparison.newAssertionRegressions ?? "N/A"} new assertion regressions</span><span>{comparison.assertionImprovements ?? "N/A"} assertion improvements</span><span>{comparison.changedCases ?? "N/A"} changed behavior</span><span>{comparison.newExecutionRegressions ?? "N/A"} new execution regressions</span></div>
             {comparison.issues.length > 0 && <div className="notice conflict"><strong>Gate reasons</strong><ul>{comparison.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
             <p className="hint">Workflow changed: {String(comparison.workflowChanged)} · Model changed: {comparison.modelChanged === null ? "N/A" : String(comparison.modelChanged)} · Confounded: {comparison.confounded === null ? "N/A" : String(comparison.confounded)}. Improvements do not cancel regressions.</p>

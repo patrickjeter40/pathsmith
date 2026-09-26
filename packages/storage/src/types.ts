@@ -6,7 +6,11 @@ import type {
   Suite,
   Workflow,
 } from "@pathsmith/contracts";
-import type { ExecutionError, ExecutionLimits } from "@pathsmith/core";
+import type {
+  ExecutionError,
+  ExecutionLimits,
+  ExecutionMode,
+} from "@pathsmith/core";
 import type { RunReport, ScenarioResult } from "@pathsmith/evaluation";
 
 /** Constructed by the server; never taken from an HTTP request. */
@@ -77,11 +81,13 @@ export interface RunSnapshot {
   limits: ExecutionLimits;
   selectedScenarioIds: string[];
   concurrency: number;
-  mode: "mock";
-  origin: "synthetic";
-  sourceRunId: null;
+  mode: ExecutionMode;
+  origin: "synthetic" | "live";
+  sourceRunId: string | null;
+  httpAttemptLimit: number;
+  liveConfirmed: boolean;
   runtimeVersion: string;
-  fixtures: Fixtures;
+  fixtures?: Fixtures;
   adapters: RunReport["adapters"];
 }
 export interface RunRecord {
@@ -100,12 +106,17 @@ export interface RunRecord {
 export interface QueueRunInput {
   workflowVersionId: string;
   suiteVersionId: string;
-  profile: ExecutionProfile;
-  fixtures: Fixtures;
+  profile?: ExecutionProfile;
+  fixtures?: Fixtures;
   selectedScenarioIds?: string[];
   limits?: Partial<ExecutionLimits>;
   concurrency?: number;
-  mode?: "mock";
+  mode?: ExecutionMode;
+  sourceRunId?: string;
+  httpAttemptLimit?: number;
+  liveConfirmed?: boolean;
+  /** Server-derived adapter identities; never accepted from HTTP clients. */
+  adapters?: RunReport["adapters"];
 }
 export interface ScenarioRunRecord {
   id: string;

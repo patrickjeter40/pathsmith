@@ -32,6 +32,15 @@ const migrations = [
       `CREATE TRIGGER run_snapshot_immutable BEFORE UPDATE OF snapshot,workspace_id,project_id,workflow_version_id,suite_version_id,source_run_id,created_at ON runs BEGIN SELECT RAISE(ABORT, 'Immutable run snapshot'); END`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      // M2 stored successful logical exchanges here (including mocks), not HTTP attempts.
+      // Preserve their payloads and historical snapshots without reinterpreting them.
+      `ALTER TABLE provider_attempts RENAME TO provider_exchanges`,
+      `CREATE TABLE provider_attempts (scenario_run_id TEXT NOT NULL REFERENCES scenario_runs(id) ON DELETE CASCADE, position INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(scenario_run_id,position))`,
+    ],
+  },
 ];
 
 export function migrate(db: BetterSQLite3Database): number {
