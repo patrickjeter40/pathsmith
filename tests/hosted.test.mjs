@@ -389,6 +389,61 @@ test("authenticated hosted API persists a project and completes an exact mock ru
   assert.equal(report.execution.actualHttpAttempts, 0);
 });
 
+for (const framing of ["content-length", "chunked"]) {
+  test(`hosted DELETE preserves ${framing} JSON bodies and mutation validation`, async (t) => {
+    const { api, send } = await setup(t);
+    const project = await api("/projects", "POST", {
+      name: `Delete with ${framing}`,
+    });
+    const path = `/api/v1/projects/${project.id}`;
+    const remove = (value, client = "local") => {
+      const body = JSON.stringify(value);
+      return send(path, {
+        method: "DELETE",
+        headers: {
+          Origin: env.PATHSMITH_PUBLIC_URL,
+          "Content-Type": "application/json",
+          ...(client ? { "X-Pathsmith-Client": client } : {}),
+          ...(framing === "chunked"
+            ? { "Transfer-Encoding": "chunked" }
+            : { "Content-Length": Buffer.byteLength(body) }),
+        },
+        ...(framing === "chunked"
+          ? { chunks: [body.slice(0, 4), body.slice(4)] }
+          : { body }),
+      });
+    };
+    assert.equal((await remove({ confirm: true }, null)).status, 403);
+    const unconfirmed = await remove({ confirm: false });
+    assert.equal(unconfirmed.status, 400);
+    assert.equal(
+      JSON.parse(unconfirmed.body).error.message,
+      "Explicit confirmation is required",
+    );
+    if (framing === "chunked") {
+      const unsupported = await send(path, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Pathsmith-Client": "local",
+          "Transfer-Encoding": "gzip, chunked",
+        },
+        chunks: ['{"confirm":true}'],
+      });
+      assert.equal(unsupported.status, 400);
+      assert.equal(
+        JSON.parse(unsupported.body).error,
+        "Unsupported transfer encoding",
+      );
+    }
+    assert.equal((await api(`/projects/${project.id}`)).id, project.id);
+    const removed = await remove({ confirm: true });
+    assert.equal(removed.status, 204, removed.body);
+    assert.equal(removed.body, "");
+    assert.equal((await send(path)).status, 404);
+  });
+}
+
 test("hosted rejects oversized requests and stops checking credentials after the failure budget", async (t) => {
   const { send } = await setup(t);
   const headers = {

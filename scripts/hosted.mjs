@@ -188,6 +188,14 @@ function proxy(request, response, apiPort) {
   ])
     if (request.headers[name] !== undefined)
       headers[name] = request.headers[name];
+  if (request.headers["transfer-encoding"] !== undefined) {
+    if (request.headers["transfer-encoding"].trim().toLowerCase() !== "chunked")
+      return send(response, 400, "Unsupported transfer encoding");
+    // Node dechunks the incoming stream. Reframe it explicitly: DELETE does not
+    // enable outgoing chunked encoding by default, unlike POST and PUT.
+    if (headers["content-length"] === undefined)
+      headers["transfer-encoding"] = "chunked";
+  }
   const upstream = httpRequest({
     hostname: "127.0.0.1",
     port: apiPort,
