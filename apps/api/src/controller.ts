@@ -40,7 +40,7 @@ export class ApiController {
     return {
       service: "pathsmith",
       status: this.local.storageFailed ? "degraded" : "ready",
-      milestone: "M4",
+      milestone: "M5",
       database: {
         status: this.local.storageFailed ? "error" : "ready",
         schemaVersion: this.local.storage.schemaVersion,

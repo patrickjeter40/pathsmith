@@ -66,7 +66,7 @@ Recorded replay matches each request against one source run, including scenario,
 
 ### Optional live Jev run
 
-Live execution is disabled by default and may incur provider charges. To enable it locally, put `PATHSMITH_ENABLE_LIVE=1` and `TYPESAFE_API_KEY=<your key>` in the backend-only `.env`, then restart `pnpm dev`. The key is never needed in the browser or workflow JSON. Select **Live** in the run controls, review the scenario count, requested model, concurrency and HTTP attempt budget, then confirm that individual run. The backend also requires `confirmLive: true`; configuration alone does not dispatch a request. `GET /api/v1/providers/status` reveals availability booleans, never the key. An optional owner-run smoke can select one safe scenario first and inspect its recorded model identity, attempts, and usage; no live smoke was performed for M4.
+Live execution is disabled by default and may incur provider charges. To enable it locally, put `PATHSMITH_ENABLE_LIVE=1` and `TYPESAFE_API_KEY=<your key>` in the backend-only `.env`, then restart `pnpm dev`. The key is never needed in the browser or workflow JSON. Select **Live** in the run controls, review the scenario count, requested model, concurrency and HTTP attempt budget, then confirm that individual run. The backend also requires `confirmLive: true`; configuration alone does not dispatch a request. `GET /api/v1/providers/status` reveals availability booleans, never the key. An optional owner-run smoke can select one safe scenario first and inspect its recorded model identity, attempts, and usage; no live smoke was performed for M5.
 
 ## Execute the headless loop
 

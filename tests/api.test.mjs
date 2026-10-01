@@ -18,6 +18,7 @@ test("Nest built API: local health, origin/host/mutation/body limits, sanitized 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-store");
     const health = await response.json();
+    assert.equal(health.milestone, "M5");
     assert.equal(health.database.status, "ready");
     assert.equal(health.database.schemaVersion, 3);
     const hostile = await new Promise((resolve, reject) => {
