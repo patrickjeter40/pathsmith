@@ -10,6 +10,10 @@ Clone this repository and open its root in Codex. The project includes [agent ro
 
 ## Start
 
+For a password-protected, single-user hosted dev instance, see the
+[Railway setup guide](docs/RAILWAY.md). Railway uses a separate hosted launcher;
+the local development commands below remain unchanged.
+
 The host setup requires **Node 24 LTS** and **pnpm 10.33.0**. Dependencies are pinned in `pnpm-lock.yaml`. SQLite is embedded; `better-sqlite3` may need native build tools during host installation. No separate database service, credentials, or paid requests are needed.
 
 ```sh
