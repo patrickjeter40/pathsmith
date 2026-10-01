@@ -1,0 +1,9 @@
+{
+  "formatVersion": "0.1",
+  "bindings": {
+    "decisions": {
+      "providerId": "mock",
+      "model": "mock-v1"
+    }
+  }
+}

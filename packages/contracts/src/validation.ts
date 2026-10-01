@@ -687,6 +687,18 @@ export function validateSuite(
   const diagnostics = shape(value, validators.suite, 8 * 1024 * 1024);
   if (diagnostics.length) return result(diagnostics);
   const suite = value as Suite;
+  const selectedSet = selectedIds ? new Set(selectedIds) : undefined;
+  if (suite.classification) {
+    const target = suite.classification;
+    const node = workflow.nodes.find((n) => n.id === target.nodeId);
+    const question = node?.kind === "judgment" ? node.questions[target.questionId] : undefined;
+    if (question?.kind !== "choice" ||
+        target.positiveLabel === target.negativeLabel ||
+        Object.keys(question.options).length !== 2 ||
+        !Object.hasOwn(question.options, target.positiveLabel) ||
+        !Object.hasOwn(question.options, target.negativeLabel))
+      diagnostics.push(error("CLASSIFICATION_INVALID", "Classification must target a choice question with exactly the two specified labels", "/classification"));
+  }
   const ids = new Set<string>(),
     nodeIds = new Set(workflow.nodes.map((n) => n.id)),
     outcomes = new Set(
@@ -701,7 +713,7 @@ export function validateSuite(
       });
     if (ids.has(scenario.id)) fail("DUPLICATE_ID", "Duplicate scenario ID");
     ids.add(scenario.id);
-    if (!selectedIds || selectedIds.includes(scenario.id)) {
+    if (!selectedSet || selectedSet.has(scenario.id)) {
       if (byteLength(scenario.input) > 64 * 1024)
         fail("RUN_LIMIT_EXCEEDED", "Scenario input exceeds 64 KiB");
       diagnostics.push(
@@ -714,6 +726,10 @@ export function validateSuite(
         ),
       );
     }
+    if (scenario.referenceLabel && (!suite.classification ||
+        scenario.referenceLabel.value !== null &&
+        ![suite.classification.positiveLabel, suite.classification.negativeLabel].includes(scenario.referenceLabel.value)))
+      fail("REFERENCE_LABEL_INVALID", "Reference label needs a classification target and must use one of its labels, or null for unclear");
     if (scenario.expected) {
       const expected = scenario.expected;
       if (!Object.values(expected).some((v) => v.length > 0))

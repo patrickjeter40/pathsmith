@@ -63,7 +63,7 @@ export interface PathsmithScenarioSuite01 {
   description: string;
   /**
    * @minItems 1
-   * @maxItems 1000
+   * @maxItems 10000
    */
   scenarios: [
     {
@@ -80,6 +80,11 @@ export interface PathsmithScenarioSuite01 {
         forbiddenNodes?: string[];
         assertions?: Expr[];
       };
+      referenceLabel?: {
+        value: string | null;
+        source: "generated" | "human" | "unknown";
+        review: "provisional" | "reviewed";
+      };
     },
     ...{
       id: string;
@@ -95,6 +100,17 @@ export interface PathsmithScenarioSuite01 {
         forbiddenNodes?: string[];
         assertions?: Expr[];
       };
+      referenceLabel?: {
+        value: string | null;
+        source: "generated" | "human" | "unknown";
+        review: "provisional" | "reviewed";
+      };
     }[]
   ];
+  classification?: {
+    nodeId: string;
+    questionId: string;
+    positiveLabel: string;
+    negativeLabel: string;
+  };
 }

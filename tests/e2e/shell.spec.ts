@@ -28,7 +28,20 @@ async function openIsolated(page: Page) {
   });
   await page.goto("/");
   await expect(page.locator(".sidebar-footer")).toContainText("API ready");
+  if (await page.locator(".advanced").getAttribute("open") === null) await page.locator(".advanced > summary").click();
   return errors;
+}
+async function clickEditableNode(page: Page, id: string) {
+  const canvas = page.locator(".workspace .canvas");
+  const node = page.locator(".workspace .react-flow__node", { hasText: id }).first();
+  await expect(canvas).toHaveAttribute("data-fit-ready", "true");
+  await node.scrollIntoViewIfNeeded();
+  await expect(canvas).toHaveAttribute("data-fit-ready", "true");
+  await expect.poll(async () => {
+    const [item, area] = await Promise.all([node.boundingBox(), canvas.boundingBox()]);
+    return !!item && !!area && Math.min(item.x + item.width, area.x + area.width) > Math.max(item.x, area.x) && Math.min(item.y + item.height, area.y + area.height) > Math.max(item.y, area.y);
+  }).toBe(true);
+  await node.click();
 }
 async function directApi<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   const response = await fetch(`${apiUrl}/api/v1${path}`, {
@@ -73,7 +86,7 @@ async function queueMinimal(workflowVersionId: string, suiteVersionId: string, o
 test("canonical gaming preview, import, and export", async ({ page }) => {
   const errors = await openIsolated(page);
   await expect(
-    page.getByRole("heading", { name: "Inspect the decision path." }),
+    page.getByRole("heading", { name: "Test how your classifier performs." }),
   ).toBeVisible();
   await expect(
     page.getByRole("status").filter({ hasText: "Valid definition" }),
@@ -101,6 +114,76 @@ test("canonical gaming preview, import, and export", async ({ page }) => {
     ),
   );
   expect(errors).toEqual([]);
+});
+
+test("guided classification imports CSV, reviews labels, and shows measured mock report", async ({ page }) => {
+  const errors = await openIsolated(page);
+  await page.getByRole("button", { name: "Start chat abuse example" }).click();
+  await expect(page.getByRole("heading", { name: "Add messages" })).toBeVisible();
+  await page.getByLabel("Import CSV").setInputFiles({ name: "messages.csv", mimeType: "text/csv", buffer: Buffer.from('\uFEFFcontent,expected_label,source,tags\r\n"A quoted,\r\nmultiline message",abusive,generated,quoted|test\r\nFriendly game,not_abusive,human,friendly\r\n') });
+  await expect(page.getByText("Preview: 2 messages · 0 need attention")).toBeVisible();
+  await page.getByRole("button", { name: "Add 2 to test set" }).click();
+  await expect(page.getByText("10 messages. Generated answers remain provisional", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "3. Run test" }).click();
+  await page.getByLabel("Test selection").selectOption("all");
+  await expect(page.getByRole("button", { name: "Run 10 messages" })).toBeDisabled();
+  await expect(page.getByRole("alert").filter({ hasText: "without mock fixtures" })).toBeVisible();
+  await page.getByLabel("Test selection").selectOption("sample");
+  await page.getByLabel("Sample size").fill("4");
+  await page.getByRole("button", { name: "Run 4 messages" }).click();
+  await expect(page.getByRole("heading", { name: "Results" })).toBeVisible();
+  await expect(page.locator(".guided .metric-grid")).toContainText("Missed abuse", { timeout: 20000 });
+  await expect(page.locator(".guided .metric-grid")).toContainText("Harmless flagged");
+  await expect(page.locator(".guided").getByRole("heading", { name: "Provisional labels" })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("guided trace ignores a delayed response after another result is selected", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Start chat abuse example" }).click();
+  await page.getByRole("button", { name: "3. Run test" }).click();
+  await page.getByRole("button", { name: "Run 8 messages" }).click();
+  await expect(page.locator(".guided .metric-grid")).toContainText("Missed abuse", { timeout: 20000 });
+  const runId = await page.getByLabel("Classification run").inputValue();
+  const missed = await directApi<{ items: { traceId: string }[] }>(`/runs/${runId}/classification/rows?verdict=false_negative&limit=50`);
+  const falseAlarms = await directApi<{ items: { traceId: string }[] }>(`/runs/${runId}/classification/rows?verdict=false_positive&limit=50`);
+  expect(missed.items[0]?.traceId).toBeTruthy();
+  expect(falseAlarms.items[0]?.traceId).toBeTruthy();
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  await page.route(`**/api/v1/scenario-runs/${missed.items[0].traceId}/trace`, async (route) => {
+    firstStarted(); await gate; await route.fulfill({ json: { marker: "delayed-first" } });
+  });
+  await page.route(`**/api/v1/scenario-runs/${falseAlarms.items[0].traceId}/trace`, async (route) => {
+    await route.fulfill({ json: { marker: "current-second" } });
+  });
+  await page.locator(".guided .text-button").first().click();
+  await started;
+  await page.getByLabel("Result verdict").selectOption("false_positive");
+  await expect(page.locator(".guided .text-button")).toHaveCount(1);
+  await page.locator(".guided .text-button").first().click();
+  await expect(page.locator(".guided .trace pre")).toContainText("current-second");
+  releaseFirst();
+  await expect(page.locator(".guided .trace pre")).toContainText("current-second");
+  await expect(page.locator(".guided .trace pre")).not.toContainText("delayed-first");
+});
+
+test("guided run waits for the reviewed test set to be published", async ({ page }) => {
+  await openIsolated(page);
+  await page.getByRole("button", { name: "Start chat abuse example" }).click();
+  await page.getByRole("button", { name: "3. Run test" }).click();
+  await expect(page.getByRole("button", { name: "Run 8 messages" })).toBeEnabled();
+  const input = page.getByLabel("Scenario input JSON");
+  const value = JSON.parse(await input.inputValue());
+  await input.fill(JSON.stringify({ ...value, content: "Changed message for draft" }));
+  await input.blur();
+  await expect(page.getByRole("button", { name: "Run 8 messages" })).toBeDisabled();
+  await page.getByRole("button", { name: "Save suite draft" }).click();
+  await expect(page.getByRole("button", { name: "Run 8 messages" })).toBeDisabled();
+  await page.getByRole("button", { name: "Publish suite" }).click();
+  await expect(page.getByRole("button", { name: "Run 8 messages" })).toBeEnabled();
 });
 
 test("load, run, reopen history, and inspect saved trace", async ({ page }) => {
@@ -316,6 +399,14 @@ test("small viewport keeps controls usable", async ({ page }) => {
   ).toBe(true);
 });
 
+test("Advanced workspace stays open after reload", async ({ page }) => {
+  await openIsolated(page);
+  await expect(page.locator(".advanced")).toHaveAttribute("open", "");
+  await page.reload();
+  await expect(page.locator(".advanced")).toHaveAttribute("open", "");
+  await expect(page.getByLabel("Saved project", { exact: true })).toBeVisible();
+});
+
 test("branch threshold edit compares two regressions and one improvement", async ({ page }) => {
   const errors = await openIsolated(page);
   await page.getByLabel("Example to load").selectOption("support-baseline");
@@ -324,7 +415,7 @@ test("branch threshold edit compares two regressions and one improvement", async
   await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
   await expect(page.getByLabel("Baseline run").locator("option").nth(1)).toContainText("Support request routing");
   const baselineId = await page.getByLabel("Baseline run").locator("option").nth(1).getAttribute("value");
-  await page.locator(".react-flow__node", { hasText: "confidence_gate" }).first().click();
+  await clickEditableNode(page, "confidence_gate");
   await expect(page.getByLabel("Case 1 literal value")).toHaveValue("0.7");
   await page.getByLabel("Case 1 literal value").fill("0.8");
   await page.getByRole("button", { name: "Save workflow draft" }).click();
@@ -384,7 +475,7 @@ test("saved recording replays a threshold change offline and survives restart", 
   await expect(page.locator(".run-details h3").first()).toContainText("completed", { timeout: 20000 });
   const sourceId = await page.getByLabel("Baseline run").locator("option").nth(1).getAttribute("value");
   expect(sourceId).toBeTruthy();
-  await page.locator(".react-flow__node", { hasText: "confidence_gate" }).first().click();
+  await clickEditableNode(page, "confidence_gate");
   await page.getByLabel("Case 1 literal value").fill("0.8");
   await page.getByRole("button", { name: "Save workflow draft" }).click();
   await page.getByRole("button", { name: "Publish workflow" }).click();
@@ -539,7 +630,7 @@ test("branch case order and named port reconnection round-trip to JSON", async (
   await page.getByLabel("Example to load").selectOption("support-baseline");
   await page.getByRole("button", { name: "Load checked example" }).click();
   await expect(page.locator(".react-flow__node", { hasText: "department_router" })).toBeVisible();
-  await page.locator(".react-flow__node", { hasText: "department_router" }).click();
+  await clickEditableNode(page, "department_router");
   const second = page.getByRole("group", { name: "Case 2" });
   await second.getByRole("button", { name: "Move up" }).click();
   await expect(page.getByLabel("Case 1 port ID")).toHaveValue("technical");
@@ -609,12 +700,22 @@ test("dragged layout persists without changing workflow semantic hash", async ({
   const projectId = await page.getByLabel("Saved project").inputValue();
   const [draft] = await directApi<{ id: string }[]>(`/projects/${projectId}/workflows`);
   const versionsBefore = await directApi<{ workflowSemanticHash: string }[]>(`/workflows/${draft.id}/versions`);
-  const node = page.locator(".react-flow__node", { hasText: "start" }).first();
-  const box = await node.boundingBox();
+  const node = page.locator(".workspace .react-flow__node", { hasText: "start" }).first();
+  await expect(page.locator(".workspace .canvas")).toHaveAttribute("data-fit-ready", "true");
+  await node.scrollIntoViewIfNeeded();
+  const nodeBox = await node.boundingBox();
+  const canvasBox = await page.locator(".workspace .canvas").boundingBox();
+  expect(nodeBox).not.toBeNull();
+  expect(canvasBox).not.toBeNull();
+  expect(Math.min(nodeBox!.x + nodeBox!.width, canvasBox!.x + canvasBox!.width) - Math.max(nodeBox!.x, canvasBox!.x)).toBeGreaterThan(0);
+  expect(Math.min(nodeBox!.y + nodeBox!.height, canvasBox!.y + canvasBox!.height) - Math.max(nodeBox!.y, canvasBox!.y)).toBeGreaterThan(0);
+  const dragHandle = node.locator(".workflow-card .kind");
+  const box = await dragHandle.boundingBox();
   expect(box).not.toBeNull();
-  await page.mouse.move(box!.x + 50, box!.y + 30);
+  const start = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  await page.mouse.move(start.x, start.y);
   await page.mouse.down();
-  await page.mouse.move(box!.x + 120, box!.y + 90, { steps: 8 });
+  await page.mouse.move(start.x + 90, start.y + 70, { steps: 12 });
   await page.mouse.up();
   await expect(page.getByRole("button", { name: "Save workflow draft" })).toBeEnabled();
   await page.getByRole("button", { name: "Save workflow draft" }).click();

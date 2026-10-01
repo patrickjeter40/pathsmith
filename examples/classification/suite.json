@@ -1,0 +1,129 @@
+{
+  "formatVersion": "0.1",
+  "id": "chat_abuse_examples",
+  "name": "Chat abuse examples",
+  "description": "Synthetic demonstration; exact mock predictions deliberately include two disagreements. This does not measure Jev quality.",
+  "classification": {
+    "nodeId": "classify",
+    "questionId": "label",
+    "positiveLabel": "abusive",
+    "negativeLabel": "not_abusive"
+  },
+  "scenarios": [
+    {
+      "id": "direct_insult",
+      "name": "direct insult",
+      "tags": [
+        "direct"
+      ],
+      "input": {
+        "content": "You are worthless. I will harass you every match."
+      },
+      "referenceLabel": {
+        "value": "abusive",
+        "source": "human",
+        "review": "reviewed"
+      }
+    },
+    {
+      "id": "friendly_chat",
+      "name": "friendly chat",
+      "tags": [
+        "friendly"
+      ],
+      "input": {
+        "content": "Thanks for the game, everyone!"
+      },
+      "referenceLabel": {
+        "value": "not_abusive",
+        "source": "human",
+        "review": "reviewed"
+      }
+    },
+    {
+      "id": "missed_threat",
+      "name": "missed threat",
+      "tags": [
+        "threat"
+      ],
+      "input": {
+        "content": "I will find you and hurt you after this match."
+      },
+      "referenceLabel": {
+        "value": "abusive",
+        "source": "human",
+        "review": "reviewed"
+      }
+    },
+    {
+      "id": "false_alarm",
+      "name": "false alarm",
+      "tags": [
+        "slang"
+      ],
+      "input": {
+        "content": "That boss fight was brutal."
+      },
+      "referenceLabel": {
+        "value": "not_abusive",
+        "source": "human",
+        "review": "reviewed"
+      }
+    },
+    {
+      "id": "generated_insult",
+      "name": "generated insult",
+      "tags": [
+        "direct"
+      ],
+      "input": {
+        "content": "Nobody wants you here, loser."
+      },
+      "referenceLabel": {
+        "value": "abusive",
+        "source": "generated",
+        "review": "provisional"
+      }
+    },
+    {
+      "id": "generated_friendly",
+      "name": "generated friendly",
+      "tags": [
+        "friendly"
+      ],
+      "input": {
+        "content": "Nice teamwork, let us try again."
+      },
+      "referenceLabel": {
+        "value": "not_abusive",
+        "source": "generated",
+        "review": "provisional"
+      }
+    },
+    {
+      "id": "unclear_chat",
+      "name": "unclear chat",
+      "tags": [
+        "context"
+      ],
+      "input": {
+        "content": "You are a real menace today."
+      },
+      "referenceLabel": {
+        "value": null,
+        "source": "generated",
+        "review": "provisional"
+      }
+    },
+    {
+      "id": "unlabeled_chat",
+      "name": "unlabeled chat",
+      "tags": [
+        "friendly"
+      ],
+      "input": {
+        "content": "See you next round."
+      }
+    }
+  ]
+}

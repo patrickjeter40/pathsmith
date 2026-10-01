@@ -1,3 +1,4 @@
+import { MAX_HTTP_ATTEMPTS } from "@pathsmith/contracts";
 import { randomUUID } from "node:crypto";
 import {
   byteLength,
@@ -210,7 +211,7 @@ export async function executeWorkflow(
   if (
     !Number.isSafeInteger(attemptBudget.remaining) ||
     attemptBudget.remaining < 0 ||
-    attemptBudget.remaining > 2000
+    attemptBudget.remaining > MAX_HTTP_ATTEMPTS
   )
     throw new PathsmithError(
       "RUN_LIMIT_EXCEEDED",

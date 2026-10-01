@@ -2,7 +2,7 @@
 
 Build, test, trace, and compare probabilistic decision workflows.
 
-**Implemented: M0–M4.** The local app saves drafts, publishes immutable workflow and suite versions, runs exact mocks and source-scoped recorded replay, retains results across restarts, edits canonical workflows on a graph, and compares saved runs. An explicit Jev live mode is available when locally enabled and configured. The [design](PATHSMITH_DESIGN.md) remains the product contract. The supplied support-routing expectations remain unchanged.
+**Implemented: M0–M5.** The local app saves drafts, publishes immutable workflow and suite versions, runs exact mocks and source-scoped recorded replay, retains results across restarts, edits canonical workflows on a graph, and compares saved runs. The guided classification screen adds imported test sets and measured reports. An explicit Jev live mode is available when locally enabled and configured. The [design](PATHSMITH_DESIGN.md) remains the product contract. The supplied support-routing expectations remain unchanged.
 
 ## Use the same Codex workflow on another device
 
@@ -50,6 +50,10 @@ Open **http://127.0.0.1:5173**. The first build installs the pinned Node 24 and 
 Compose reads an optional local `.env` for variable substitution and passes `TYPESAFE_API_KEY`, `TYPESAFE_MODEL`, and `PATHSMITH_ENABLE_LIVE` to the backend process. The file is excluded from the image; the launcher removes these values from Vite's environment. For live access, copy `.env.example` to `.env`, set the key and `PATHSMITH_ENABLE_LIVE=1`, then recreate the container with `docker compose up --force-recreate`. Each live run still requires explicit confirmation in the app. Do not put secrets in `VITE_` variables. To pick up source edits in this container setup, rerun `docker compose up --build`; the host `pnpm dev` command provides the regular edit loop.
 
 ## Use the local app
+
+For a classification test, select **Start chat abuse example** on the main screen. Paste one message per line, or import CSV with a required `content` column and optional `expected_label`, `source`, and `tags` columns. Labels are `abusive`, `not_abusive`, or `unclear`; source is `generated`, `human`, or `unknown`; separate tags with `|`. Preview flags invalid and duplicate messages before saving. Review expected labels, run a deterministic sample spread across the test set or the full published set, and inspect missed abuse, false alarms, failures, reviewed/provisional agreement, tag slices, and saved row traces. Export CSV/JSON for external review; no LLM review is sent automatically. Live Jev needs the flag, key, per-run consent, and an explicit attempt budget. The graph, raw JSON, history, and comparisons are under **Advanced**.
+
+The classification example and its mock fixtures are synthetic. Agreement with generated or provisional labels is not verified model accuracy. New imported messages will not match the starter's exact mock fixtures; use live Jev only when configured and intended, or add matching fixtures externally.
 
 1. Load a checked gaming or support-routing example. This creates a project with published workflow and suite versions.
 2. Edit the workflow graph or canonical JSON, then save and publish a new workflow version. The graph supports node forms, named ports, ordered branch cases, undo/redo, validation, and separate layout positions. Invalid drafts remain editable but cannot be published or exported. Select a scenario to edit its input or expectations JSON; save and publish the suite separately. A stale save reports a conflict and preserves local edits.
@@ -165,8 +169,8 @@ Tests are offline except for loopback API/browser requests. Browser tests use an
 
 Use `pnpm generate` after an intentional schema change, and commit generated types with the schema. `pnpm generate:check` verifies drift and equality of shared question/expression contracts. Schemas and fixture files are not rewritten by formatting. `pnpm db:migrate` creates or advances the local SQLite schema, using `PATHSMITH_DATA_DIR` when set.
 
-See [M0–M1 evidence](docs/M0-M1-RESULTS.md), [M2 evidence](docs/M2-RESULTS.md), [M3 evidence](docs/M3-RESULTS.md), [M4 evidence](docs/M4-RESULTS.md), and the [initial](docs/decisions/001-implementation-contract.md), [M2](docs/decisions/002-m2-local-persistence.md), and [M4](docs/decisions/003-m4-replay-provider-records.md) decision notes.
+See [M0–M1 evidence](docs/M0-M1-RESULTS.md), [M2 evidence](docs/M2-RESULTS.md), [M3 evidence](docs/M3-RESULTS.md), [M4 evidence](docs/M4-RESULTS.md), [M5 evidence](docs/M5-RESULTS.md), and the [M5 contract decision](docs/decisions/004-m5-classification-evaluation.md).
 
 ## Next product check
 
-Ask representative developers whether this local cycle is more useful than maintaining their own evaluation harness. Hosted service, package publication, and public deployment remain future decisions. No live or billable smoke test was run for M4.
+Ask representative developers to try the guided classification cycle with their own labeled data and judge whether the report helps them improve a workflow. In-app LLM analysis remains the agreed follow-up. Hosted service, package publication, and public deployment remain future decisions. No live or billable smoke test was run for M5.

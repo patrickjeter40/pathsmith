@@ -6,6 +6,7 @@ import {
   type Workflow,
 } from "@pathsmith/contracts";
 import { WorkflowEditor, type Layout } from "./WorkflowEditor";
+import { GuidedClassification } from "./GuidedClassification";
 import gaming from "../../../examples/gaming/workflow.json";
 import "@xyflow/react/dist/style.css";
 import "./style.css";
@@ -208,6 +209,7 @@ export default function App() {
   const redoStack = useRef<{ text: string; layout: Layout }[]>([]);
   const [suiteText, setSuiteText] = useState("");
   const [view, setView] = useState<"graph" | "json">("graph");
+  const [advancedOpen, setAdvancedOpen] = useState(() => window.localStorage.getItem("pathsmith.advancedOpen") === "1");
   const [selectedNode, setSelectedNode] = useState("route_content");
   const [selectedCase, setSelectedCase] = useState("");
   const [message, setMessage] = useState("");
@@ -403,6 +405,16 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+  async function loadClassification() {
+    setBusy(true); setMessage("");
+    try {
+      const loaded = await api<{ project: Project; fixtureSetId: string }>("/examples/classification/load", "POST");
+      await refreshProjects();
+      await openProject(loaded.project.id, loaded.fixtureSetId);
+      setMessage("Loaded the chat abuse classification example.");
+    } catch (error) { setMessage(String(error)); }
+    finally { setBusy(false); }
   }
   const validation = useMemo(() => {
     try {
@@ -760,7 +772,7 @@ export default function App() {
         <div className="sidebar-footer">
           <span className="dot" />
           {health}
-          <p>M4 · recorded replay and live provider controls</p>
+          <p>M5 · guided classification tests</p>
         </div>
       </aside>
       <main>
@@ -769,12 +781,18 @@ export default function App() {
             <span className="breadcrumb">
               {projectId
                 ? projects.find((item) => item.id === projectId)?.name
-                : "Examples / Gaming"}
+                : "Pathsmith / Local workspace"}
             </span>
-            <h1>Inspect the decision path.</h1>
+            <h1>Test how your classifier performs.</h1>
           </div>
           <span className={`mode mode-${runMode}`}>● {modeLabel(runMode).toUpperCase()}{runMode === "mock" ? " · OFFLINE" : runMode === "replay" ? " · NO NEW HTTP" : " · EXTERNAL REQUESTS"}</span>
         </header>
+        <GuidedClassification projectId={projectId} projects={projects} suiteDraft={suiteDraft} suiteDirty={suiteDirty} workflowVersionId={workflowVersionId} suiteVersionId={suiteVersionId} run={run} runs={runs} providerStatus={providerStatus}
+          onLoadStarter={loadClassification} onOpenProject={openProject}
+          onSuitePublished={(draft, version) => { setSuiteDraft((current) => current ? { ...current, ...draft } : current); setSuiteText(pretty(draft.definition)); setSuiteVersions((current) => [version, ...current]); setSuiteVersionId(version.id); }}
+          onRunQueued={async (id) => { if (projectId) await refreshRuns(projectId, id); }} onSelectRun={openRun} />
+        <details className="advanced" open={advancedOpen} onToggle={(event) => { const open = event.currentTarget.open; setAdvancedOpen(open); window.localStorage.setItem("pathsmith.advancedOpen", open ? "1" : "0"); }}><summary>Advanced: graph, JSON, versions, traces and comparisons</summary>
+        {advancedOpen && <>
         <section className="m2-panel" id="projects">
           <div className="section-heading">
             <div>
@@ -899,7 +917,7 @@ export default function App() {
             </span>
           </div>
           {view === "json" ? <div className="editor"><div className="canvas"><textarea aria-label="Workflow JSON" spellCheck={false} value={text} onChange={(event) => editDefinition(event.target.value)} /></div><aside className="inspector"><span className="eyebrow">CANONICAL DEFINITION</span><p>JSON edits and graph edits update the same draft. Invalid JSON stays in this editor until corrected.</p></aside></div>
-            : workflow ? <WorkflowEditor workflow={workflow} layout={layout} selectedNode={selectedNode} onSelect={setSelectedNode} onEdit={(value) => editDefinition(pretty(value))} onLayout={editLayout} />
+            : workflow ? <WorkflowEditor key={workflowDraft?.id ?? "preview"} workflow={workflow} layout={layout} selectedNode={selectedNode} onSelect={setSelectedNode} onEdit={(value) => editDefinition(pretty(value))} onLayout={editLayout} />
             : <div className="empty"><strong>Resolve definition errors</strong><button onClick={() => setView("json")}>Open JSON definition</button></div>}
           <div className="problems">
             <strong>
@@ -1263,6 +1281,8 @@ export default function App() {
             {selectedComparisonCase && comparisonSnapshots && (() => { const item = comparison.cases.find((entry) => entry.scenarioId === selectedComparisonCase); if (!item) return null; return <div className="case-comparison"><h3>{item.scenarioId}</h3><p>First observed divergence: {item.firstDivergence ? `edge ${item.firstDivergence.index + 1}: ${item.firstDivergence.baselineEdge ?? "end"} → ${item.firstDivergence.candidateEdge ?? "end"}` : "none in selected edges"}</p><div className="diff-grid"><div><h4>Baseline · {item.baseline.assertionStatus}</h4><p>{item.baseline.status} · {item.baseline.outcome ?? "N/A"}</p><WorkflowEditor workflow={comparisonSnapshots.baseline.workflow} layout={comparisonSnapshots.baseline.layout ?? {}} selectedNode="" onSelect={() => {}} selectedEdges={item.baseline.selectedEdges} visitedNodes={item.baseline.visitedNodes} /><pre>{comparisonTraces ? pretty(comparisonTraces.baseline) : "Loading baseline trace…"}</pre></div><div><h4>Candidate · {item.candidate.assertionStatus}</h4><p>{item.candidate.status} · {item.candidate.outcome ?? "N/A"}</p><WorkflowEditor workflow={comparisonSnapshots.candidate.workflow} layout={comparisonSnapshots.candidate.layout ?? {}} selectedNode="" onSelect={() => {}} selectedEdges={item.candidate.selectedEdges} visitedNodes={item.candidate.visitedNodes} /><pre>{comparisonTraces ? pretty(comparisonTraces.candidate) : "Loading candidate trace…"}</pre></div></div></div>; })()}
           </div>}
         </section>
+        </>}
+        </details>
       </main>
     </div>
   );

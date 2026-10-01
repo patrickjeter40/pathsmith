@@ -115,7 +115,9 @@ test("M2 HTTP gaming run, historical trace, saved versions, stale tabs, and rest
   const env = await setup(t);
   const examples = await env.request("/examples");
   assert.equal(examples.status, 200);
-  assert.equal(examples.body[0].id, "gaming");
+  const gaming = examples.body.find((example) => example.id === "gaming");
+  assert.ok(gaming, "The gaming example remains available in the catalog");
+  assert.equal(gaming.fixtureSetId, "gaming");
   const loadedResponse = await env.request("/examples/gaming/load", "POST", {});
   assert.equal(loadedResponse.status, 201);
   const loaded = loadedResponse.body;

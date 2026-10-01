@@ -103,6 +103,9 @@ export interface RunRecord {
   error: ExecutionError | null;
   completedScenarios: number;
 }
+export type RunOverview = Omit<RunRecord, "report"> & {
+  report: Pick<RunReport, "summary" | "coverage" | "adapters" | "mixedModel"> | null;
+};
 export interface QueueRunInput {
   workflowVersionId: string;
   suiteVersionId: string;

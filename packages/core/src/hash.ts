@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { inspectJson, type Workflow } from "@pathsmith/contracts";
+import { inspectJson, MAX_ARTIFACT_BYTES, type Workflow } from "@pathsmith/contracts";
 import { assertValid } from "./error.js";
 
 /** UTF-8 JSON, recursive lexicographic object-key order, preserved array order. */
 export function canonicalize(value: unknown): string {
-  const diagnostics = inspectJson(value, 64 * 1024 * 1024);
+  const diagnostics = inspectJson(value, MAX_ARTIFACT_BYTES);
   assertValid(
     { valid: diagnostics.length === 0, diagnostics },
     "ARTIFACT_INVALID",

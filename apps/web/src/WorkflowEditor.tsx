@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background, Controls, Handle, Position, ReactFlow,
-  type Connection, type Edge, type Node, type NodeProps,
+  type Connection, type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from "@xyflow/react";
 import { requiredPorts, validateWorkflow, type Workflow, type WorkflowNode } from "@pathsmith/contracts";
 
@@ -74,6 +74,36 @@ function references(workflow: Workflow) {
 }
 
 export function WorkflowEditor({ workflow, layout, selectedNode, onSelect, onEdit, onLayout, selectedEdges, visitedNodes, coverage }: Props) {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const flowRef = useRef<ReactFlowInstance | null>(null);
+  const fitGeneration = useRef(0);
+  const [fitReady, setFitReady] = useState(false);
+  function scheduleFit() {
+    const generation = ++fitGeneration.current;
+    setFitReady(false);
+    let attempts = 0;
+    const tryFit = () => {
+      window.requestAnimationFrame(() => {
+        if (generation !== fitGeneration.current) return;
+        if (!canvasRef.current?.clientWidth || !canvasRef.current.clientHeight || !flowRef.current) {
+          if (attempts++ < 12) tryFit();
+          return;
+        }
+        void flowRef.current.fitView({ duration: 0, padding: 0.12 }).then((fitted) => {
+          if (generation !== fitGeneration.current) return;
+          if (fitted) setFitReady(true);
+          else if (attempts++ < 12) tryFit();
+        });
+      });
+    };
+    tryFit();
+  }
+  useEffect(() => {
+    const observer = new ResizeObserver(() => scheduleFit());
+    if (canvasRef.current) observer.observe(canvasRef.current);
+    scheduleFit();
+    return () => { observer.disconnect(); fitGeneration.current++; };
+  }, [workflow.id]);
   const [feedback, setFeedback] = useState("");
   const [newKind, setNewKind] = useState<WorkflowNode["kind"]>("branch");
   const editable = !!onEdit;
@@ -166,7 +196,8 @@ export function WorkflowEditor({ workflow, layout, selectedNode, onSelect, onEdi
     }
   }
   return <div className="editor">
-    <div className="canvas"><ReactFlow nodes={graphNodes} edges={graphEdges} nodeTypes={nodeTypes} nodesDraggable={editable} nodesConnectable={editable} edgesReconnectable={editable}
+    <div className="canvas" ref={canvasRef} data-fit-ready={fitReady}><ReactFlow nodes={graphNodes} edges={graphEdges} nodeTypes={nodeTypes} nodesDraggable={editable} nodesConnectable={editable} edgesReconnectable={editable}
+      onInit={(instance) => { flowRef.current = instance; scheduleFit(); }}
       onNodeClick={(_, item) => onSelect(item.id)} onPaneClick={() => onSelect("")}
       onConnect={changeConnection} onReconnect={(old, connection) => changeConnection(connection, old.id)}
       onNodeDragStop={(_, item) => onLayout?.({ ...layout, positions: { ...layout.positions, [item.id]: item.position } })}

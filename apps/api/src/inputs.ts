@@ -41,8 +41,8 @@ export function revision(value: unknown): number {
 }
 export function selection(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || !value.length || value.length > 1000)
-    badRequest("Select 1–1,000 scenario IDs");
+  if (!Array.isArray(value) || !value.length || value.length > 10_000)
+    badRequest("Select 1–10,000 scenario IDs");
   return value.map(identifier);
 }
 export function pagination(

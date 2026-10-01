@@ -33,7 +33,7 @@ const help = `Pathsmith 0.1 ? local execution and recorded replay
       --mode replay --source <report> [--profile <matching-profile>]
       --mode live --profile <file> --enable-live
       [--scenarios id,id] [--concurrency 1..16] [--limits <file>]
-      [--http-attempt-limit 1..2000]
+      [--http-attempt-limit 1..30000]
   compare --baseline <report> --candidate <report> [--strict]
       [--accept-mixed-model] --out <file>
 
@@ -41,7 +41,8 @@ Mock is the default. Replay is offline and source-scoped, with no live fallback.
 Live also requires TYPESAFE_API_KEY and sends state/questions to TypeSafe;
 usage may be billed. The total HTTP attempt limit defaults to 200.
 Run artifacts contain inputs, questions, and responses. Keep them private.
-Source recording import limit: 8 MiB. Exit: 0 success, 1 assertion/gate failure,
+Source recording import limit: 256 MiB. Suite import limit: 8 MiB.
+Exit: 0 success, 1 assertion/gate failure,
 2 invalid/incomplete/execution failure. Available reports are written first.
 `;
 const optionNames = [
@@ -71,7 +72,11 @@ async function read(
   const buffer = await readFile(path);
   if (buffer.byteLength > maxBytes)
     throw new PathsmithError("ARTIFACT_INVALID", "Import exceeds byte limit");
-  return parseJson(buffer.toString("utf8"), maxBytes);
+  try {
+    return parseJson(buffer.toString("utf8"), maxBytes);
+  } catch {
+    throw new PathsmithError("ARTIFACT_INVALID", "Import must contain safe, valid JSON within its byte limit");
+  }
 }
 async function output(value: unknown) {
   const content = JSON.stringify(value) + "\n";
@@ -169,7 +174,7 @@ async function main() {
     let sourceRunId: string | undefined;
     let sourceOrigin: "synthetic" | "live" | undefined;
     if (mode === "replay") {
-      const source = readRunReport(await read(required("source")));
+      const source = readRunReport(await read(required("source"), MAX_REPORT_BYTES));
       if (values.profile) {
         const profile = await read(required("profile"));
         assertValid(

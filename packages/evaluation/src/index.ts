@@ -1,3 +1,4 @@
+import { MAX_HTTP_ATTEMPTS, MAX_ARTIFACT_BYTES } from "@pathsmith/contracts";
 import { randomUUID } from "node:crypto";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import {
@@ -36,7 +37,8 @@ import {
   type TraceEvent,
 } from "@pathsmith/core";
 
-export const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+export const MAX_REPORT_BYTES = MAX_ARTIFACT_BYTES;
+export * from "./classification.js";
 
 export interface AssertionDetail {
   kind: "outcome" | "required_node" | "forbidden_node" | "expression";
@@ -185,22 +187,24 @@ export function coverage(workflow: Workflow, scenarios: ScenarioResult[]) {
     edgesTotal: edges.length,
   };
 }
+export type SummaryFacts = Pick<ScenarioResult, "scenarioId" | "status" | "started" | "assertionStatus" | "result" | "logicalJudgments" | "actualHttpAttempts" | "replayedJudgments" | "usage" | "historicalUsage">;
 export function summarize(
   suite: Suite,
   selectedIds: string[],
-  scenarios: ScenarioResult[],
+  scenarios: SummaryFacts[],
 ) {
+  const byId = new Map(suite.scenarios.map((s) => [s.id, s]));
   const selected = selectedIds.length,
     completed = scenarios.filter((s) => s.status === "completed").length,
     failedExecution = scenarios.filter((s) => s.status === "failed").length,
     canceled = scenarios.filter((s) => s.status === "canceled").length;
   const labeled = selectedIds.filter(
-      (id) => suite.scenarios.find((s) => s.id === id)?.expected,
+      (id) => byId.get(id)?.expected,
     ).length,
     labeledCompleted = scenarios.filter(
       (s) =>
         s.status === "completed" &&
-        suite.scenarios.find((c) => c.id === s.scenarioId)?.expected,
+        byId.get(s.scenarioId)?.expected,
     ).length;
   const assertionPassed = scenarios.filter(
       (s) => s.assertionStatus === "passed",
@@ -287,7 +291,7 @@ export interface RunSuiteOptions {
   selectedScenarioIds?: string[];
   limits?: Partial<ExecutionLimits>;
   concurrency?: number;
-  /** Explicit override of the default 200; maximum 2,000 is a Pathsmith cap. */
+  /** Explicit override of the default 200; maximum 30,000 is a Pathsmith cap. */
   httpAttemptLimit?: number;
   signal?: AbortSignal;
   workspaceId?: string;
@@ -307,11 +311,11 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
   if (
     !Number.isSafeInteger(httpAttemptLimit) ||
     httpAttemptLimit < 1 ||
-    httpAttemptLimit > 2000
+    httpAttemptLimit > MAX_HTTP_ATTEMPTS
   )
     throw new PathsmithError(
       "RUN_LIMIT_EXCEEDED",
-      "HTTP attempt limit must be an integer from 1 through 2,000",
+      "HTTP attempt limit must be an integer from 1 through 30,000",
     );
   const httpAttemptBudget = { remaining: httpAttemptLimit };
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16)
@@ -382,10 +386,10 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     ),
   };
   assertValid(validateProfile(profile, workflow), "PROVIDER_NOT_CONFIGURED");
+  const selection = options.selectedScenarioIds ? new Set(options.selectedScenarioIds) : undefined;
   const selected = suite.scenarios.filter(
       (s) =>
-        !options.selectedScenarioIds ||
-        options.selectedScenarioIds.includes(s.id),
+        !selection || selection.has(s.id),
     ),
     results = new Map<string, ScenarioResult>();
   const controller = new AbortController(),
@@ -394,8 +398,48 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
   else options.signal?.addEventListener("abort", cancel, { once: true });
   let next = 0,
     storageError: ExecutionError | undefined;
-  // Reserve snapshots, not-started inputs, and bounded aggregate metadata before retaining results.
-  let reportBytes = byteLength(workflow) + 2 * byteLength(suite) + 1024 * 1024;
+  const pendingRows = new Map<string, ScenarioResult>(selected.map((s) => [s.id, {
+        scenarioId: s.id,
+        input: s.input,
+        started: false,
+        status: "canceled" as const,
+        assertionStatus: "not_evaluated" as const,
+        assertions: [],
+        error: toExecutionError(
+          new PathsmithError("RUN_CANCELED", "Canceled before dispatch"),
+          undefined,
+          s.id,
+        ),
+        visitedNodes: [],
+        selectedEdges: [],
+        logicalJudgments: 0,
+        actualHttpAttempts: 0,
+        replayedJudgments: 0,
+        elapsedMs: 0,
+        usage:
+          options.mode !== "mock" ? { inputTokens: 0, outputTokens: 0 } : null,
+        historicalUsage: null,
+        events: [],
+        exchanges: [],
+        attempts: [],
+        outputs: {},
+      }]));
+  const pendingBytes = new Map([...pendingRows].map(([id, row]) => [id, byteLength(row)]));
+  // Reserve every absent row before dispatch, plus bounded accounting retained by
+  // workers that may finish after another worker exhausts the report budget.
+  const overflowReserve = Math.min(concurrency, selected.length) *
+    (limits.scenarioArtifactBytes + limits.providerResponseBytes + 512 * 1024);
+  let reportBytes = byteLength(workflow) + 2 * byteLength(suite) + 1024 * 1024 +
+    [...pendingBytes.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const retainedModels = new Set<string>();
+  const modelCost = (item: ScenarioResult) => {
+    const additions = new Map<string, number>();
+    for (const exchange of item.exchanges) {
+      const key = JSON.stringify([exchange.binding, exchange.response.model]);
+      if (!retainedModels.has(key)) additions.set(key, byteLength(exchange.response.model) + 1);
+    }
+    return additions;
+  };
   async function worker() {
     while (!controller.signal.aborted && next < selected.length) {
       const scenario = selected[next++];
@@ -434,11 +478,13 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         outputs: execution.outputs,
       };
       const itemBytes = byteLength(item, MAX_REPORT_BYTES);
-      if (reportBytes + itemBytes > MAX_REPORT_BYTES) {
+      const newModels = modelCost(item);
+      const modelBytes = [...newModels.values()].reduce((sum, bytes) => sum + bytes, 0);
+      if (reportBytes + itemBytes - pendingBytes.get(scenario.id)! + modelBytes + overflowReserve > MAX_REPORT_BYTES) {
         storageError = toExecutionError(
           new PathsmithError(
             "RUN_LIMIT_EXCEEDED",
-            "Run artifact exceeds the 64 MiB report budget",
+            "Run artifact exceeds the 256 MiB report budget",
           ),
         );
         controller.abort();
@@ -459,11 +505,13 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
           usage: item.usage,
           historicalUsage: item.historicalUsage,
           events: [],
-          exchanges: [],
+          exchanges: item.exchanges,
           attempts: item.attempts,
           outputs: {},
         };
-      } else reportBytes += itemBytes;
+      }
+      reportBytes += byteLength(item, MAX_REPORT_BYTES) - pendingBytes.get(scenario.id)! + modelBytes;
+      for (const key of newModels.keys()) retainedModels.add(key);
       results.set(scenario.id, immutable(item));
       if (options.onScenario)
         try {
@@ -489,35 +537,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
   } finally {
     options.signal?.removeEventListener("abort", cancel);
   }
-  const scenarios = selected.map(
-    (s) =>
-      results.get(s.id) ?? {
-        scenarioId: s.id,
-        input: s.input,
-        started: false,
-        status: "canceled" as const,
-        assertionStatus: "not_evaluated" as const,
-        assertions: [],
-        error: toExecutionError(
-          new PathsmithError("RUN_CANCELED", "Canceled before dispatch"),
-          undefined,
-          s.id,
-        ),
-        visitedNodes: [],
-        selectedEdges: [],
-        logicalJudgments: 0,
-        actualHttpAttempts: 0,
-        replayedJudgments: 0,
-        elapsedMs: 0,
-        usage:
-          options.mode !== "mock" ? { inputTokens: 0, outputTokens: 0 } : null,
-        historicalUsage: null,
-        events: [],
-        exchanges: [],
-        attempts: [],
-        outputs: {},
-      },
-  );
+  const scenarios = selected.map((s) => results.get(s.id) ?? pendingRows.get(s.id)!);
   const selectedScenarioIds = selected.map((s) => s.id).sort();
   const adapters = Object.fromEntries(
     Object.entries(bindings).map(([name, b]) => [
@@ -539,7 +559,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
       },
     ]),
   );
-  return immutable({
+  const report: RunReport = {
     formatVersion: "0.1",
     artifactType: "pathsmith_run",
     id,
@@ -574,7 +594,12 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     summary: summarize(suite, selectedScenarioIds, scenarios),
     coverage: coverage(workflow, scenarios),
     ...(storageError ? { error: storageError } : {}),
-  });
+  };
+  // Keep the public writer bound authoritative even for unusual metadata from
+  // portable callers. Already persisted rows remain available if this fails.
+  if (byteLength(report, MAX_REPORT_BYTES) > MAX_REPORT_BYTES)
+    throw new PathsmithError("RUN_LIMIT_EXCEEDED", "Final run artifact exceeds the report byte budget");
+  return immutable(report);
 }
 
 export function workflowDiff(baseline: Workflow, candidate: Workflow) {
@@ -624,21 +649,21 @@ export function compareRuns(
   )
     issues.push("Mixed-model provenance requires explicit acceptance");
   for (const report of [baseline, candidate]) {
+    const executionsById = new Map(report.scenarios.map((s) => [s.scenarioId, s]));
+    const casesById = new Map(report.suite.scenarios.map((s) => [s.id, s]));
     if (
       report.scenarios.length !== report.selectedScenarioIds.length ||
       new Set(report.scenarios.map((s) => s.scenarioId)).size !==
         report.scenarios.length ||
       report.selectedScenarioIds.some(
-        (id) => !report.scenarios.some((s) => s.scenarioId === id),
+        (id) => !executionsById.has(id),
       )
     )
       issues.push("Missing or duplicate comparison pair");
     if (report.scenarios.some((s) => s.status !== "completed"))
       issues.push("Scenario execution is incomplete");
     for (const execution of report.scenarios) {
-      const scenario = report.suite.scenarios.find(
-        (s) => s.id === execution.scenarioId,
-      );
+      const scenario = casesById.get(execution.scenarioId);
       if (!scenario || !execution.result || execution.status !== "completed") {
         issues.push("Scenario result or snapshot is missing");
         continue;
@@ -657,9 +682,10 @@ export function compareRuns(
       }
     }
   }
+  const baselineById = new Map(baseline.scenarios.map((s) => [s.scenarioId,s]));
+  const candidateById = new Map(candidate.scenarios.map((s) => [s.scenarioId,s]));
   const cases = baseline.selectedScenarioIds.flatMap((id) => {
-    const a = baseline.scenarios.find((s) => s.scenarioId === id),
-      b = candidate.scenarios.find((s) => s.scenarioId === id);
+    const a = baselineById.get(id), b = candidateById.get(id);
     if (!a || !b) return [];
     const changed =
       a.result?.outcomeId !== b.result?.outcomeId ||

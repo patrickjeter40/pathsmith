@@ -1,3 +1,4 @@
+import { MAX_ARTIFACT_BYTES } from "./limits.js";
 import type { Diagnostic, Json } from "./types.js";
 
 export const forbiddenKeys = new Set(["__proto__", "prototype", "constructor"]);
@@ -141,7 +142,7 @@ function measure(
 }
 
 /** Invalid or over-budget values measure as Infinity without expanded serialization. */
-export const byteLength = (value: unknown, maxBytes = 64 * 1024 * 1024) =>
+export const byteLength = (value: unknown, maxBytes = MAX_ARTIFACT_BYTES) =>
   measure(value, maxBytes).bytes;
 export const inspectJson = (
   value: unknown,

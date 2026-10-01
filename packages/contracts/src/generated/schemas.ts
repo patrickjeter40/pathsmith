@@ -630,7 +630,7 @@ export const schemas = {
       "scenarios": {
         "type": "array",
         "minItems": 1,
-        "maxItems": 1000,
+        "maxItems": 10000,
         "items": {
           "type": "object",
           "properties": {
@@ -688,6 +688,42 @@ export const schemas = {
               },
               "required": [],
               "additionalProperties": false
+            },
+            "referenceLabel": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source": {
+                  "enum": [
+                    "generated",
+                    "human",
+                    "unknown"
+                  ]
+                },
+                "review": {
+                  "enum": [
+                    "provisional",
+                    "reviewed"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "source",
+                "review"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -698,6 +734,36 @@ export const schemas = {
           ],
           "additionalProperties": false
         }
+      },
+      "classification": {
+        "type": "object",
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+          },
+          "questionId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+          },
+          "positiveLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "negativeLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "nodeId",
+          "questionId",
+          "positiveLabel",
+          "negativeLabel"
+        ],
+        "additionalProperties": false
       }
     },
     "required": [

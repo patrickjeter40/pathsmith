@@ -10,6 +10,14 @@ import { StorageError } from "@pathsmith/storage";
 
 const catalog = [
   {
+    id: "classification",
+    name: "Chat abuse test",
+    description: "Eight synthetic messages with reference labels and a measured classification report. Mock answers include two deliberate disagreements.",
+    fixtureSetId: "classification",
+    folder: "classification",
+    workflowFile: "workflow.json",
+  },
+  {
     id: "gaming",
     name: "Gaming",
     description:
@@ -71,7 +79,7 @@ export function loadFixtureSet(id: string): {
 } {
   // The caller selects a fixed catalog key; no request value becomes a path.
   const folder =
-    id === "gaming"
+    id === "classification" ? "classification" : id === "gaming"
       ? "gaming"
       : id === "support-routing"
         ? "support-routing"

@@ -367,7 +367,7 @@ test("Live gates require backend enablement, key and per-request consent; status
         await env.request("/runs", "POST", {
           ...body,
           confirmLive: true,
-          httpAttemptLimit: 2001,
+          httpAttemptLimit: 30001,
         })
       ).status,
       400,

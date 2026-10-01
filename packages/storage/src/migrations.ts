@@ -41,6 +41,15 @@ const migrations = [
       `CREATE TABLE provider_attempts (scenario_run_id TEXT NOT NULL REFERENCES scenario_runs(id) ON DELETE CASCADE, position INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(scenario_run_id,position))`,
     ],
   },
+  {
+    version: 3,
+    statements: [
+      `ALTER TABLE scenario_runs ADD COLUMN summary TEXT`,
+      `UPDATE scenario_runs SET summary=json_remove(result,'$.events','$.exchanges','$.outputs')`,
+      `ALTER TABLE runs ADD COLUMN overview TEXT`,
+      `UPDATE runs SET overview=json_object('summary',json_extract(report,'$.summary'),'coverage',json_extract(report,'$.coverage'),'adapters',json_extract(report,'$.adapters'),'mixedModel',json_extract(report,'$.mixedModel')) WHERE report IS NOT NULL`,
+    ],
+  },
 ];
 
 export function migrate(db: BetterSQLite3Database): number {

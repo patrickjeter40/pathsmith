@@ -13,7 +13,7 @@ import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import type { NextFunction, Request, Response } from "express";
 import { map } from "rxjs";
-import { byteLength, inspectJson } from "@pathsmith/contracts";
+import { byteLength, inspectJson, MAX_ARTIFACT_BYTES } from "@pathsmith/contracts";
 import { PathsmithError } from "@pathsmith/core";
 import { StorageError } from "@pathsmith/storage";
 import { ApiController } from "./controller.js";
@@ -87,13 +87,13 @@ class ResponseBudget implements NestInterceptor {
       map((value: unknown) => {
         if (
           value !== undefined &&
-          byteLength(value, 64 * 1024 * 1024) > 64 * 1024 * 1024
+          byteLength(value, MAX_ARTIFACT_BYTES) > MAX_ARTIFACT_BYTES
         )
           throw new HttpException(
             {
               error: {
                 code: "RESPONSE_TOO_LARGE",
-                message: "Response exceeds 64 MiB; request a smaller page",
+                message: "Response exceeds 256 MiB; request a smaller page",
               },
             },
             413,
@@ -104,6 +104,7 @@ class ResponseBudget implements NestInterceptor {
   }
 }
 function requestBudget(request: Request): number {
+  if (request.path === "/api/v1/runs") return 1024 * 1024;
   // Import envelopes have a small allowance above the artifact's own checked limit.
   if (
     /^\/api\/v1\/(?:projects\/[^/]+\/suites|suites\/[^/]+\/draft)$/.test(

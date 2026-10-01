@@ -293,7 +293,7 @@ test("AC-12: bounded transient retries, Retry-After and attempt timeout", async 
   assert.equal(timed.actualHttpAttempts, 3);
 });
 
-test("AC-13: cancellation and scenario deadline abort in-flight work, no pending attempts or retries", async () => {
+test("AC-13: cancellation aborts in-flight work and deadlines prevent late work or retries", async () => {
   const controller = new AbortController();
   let signalSeen;
   const canceled = await execute(
@@ -309,13 +309,22 @@ test("AC-13: cancellation and scenario deadline abort in-flight work, no pending
   assert.equal(canceled.actualHttpAttempts, 1);
   assert.ok(signalSeen.aborted);
   assert.equal(canceled.attempts[0].status, "canceled");
+  let deadlineCalls = 0, deadlineSignal;
   const deadline = await execute(
-    async () => new Promise(() => {}),
+    async (_url, init) => {
+      deadlineCalls++;
+      deadlineSignal = init.signal;
+      return new Promise(() => {});
+    },
     {},
     { limits: { scenarioDeadlineMs: 10 } },
   );
   assert.equal(deadline.error.code, "RUN_LIMIT_EXCEEDED");
-  assert.equal(deadline.actualHttpAttempts, 1);
+  // Under parallel CPU load the deadline can expire before dispatch. Both
+  // timings must preserve exact observed attempt accounting and forbid retries.
+  assert.equal(deadline.actualHttpAttempts, deadlineCalls);
+  assert.ok(deadlineCalls <= 1);
+  if (deadlineCalls) assert.ok(deadlineSignal.aborted);
 });
 
 test("Unknown usage, size bounds and reflected provider credentials remain safe", async () => {

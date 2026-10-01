@@ -837,9 +837,10 @@ These are configurable POC defaults and application limits, not provider capabil
 |---|---:|
 | Workflow nodes / edges | 100 / 500 |
 | Questions per judgment | 32 |
-| Scenarios per suite | 1,000 |
+| Scenarios per suite | 10,000 (M5; subject to byte limits) |
 | Workflow import | 512 KiB |
-| Suite or recording import | 8 MiB |
+| Suite import | 8 MiB |
+| Full run recording / report | 256 MiB (M5) |
 | Individual scenario input | 64 KiB serialized JSON |
 | Resolved provider request | 128 KiB serialized JSON |
 | Response body retained per attempt | 512 KiB |
@@ -849,7 +850,7 @@ These are configurable POC defaults and application limits, not provider capabil
 | In-flight live requests | 4 process-wide |
 | Concurrent mock scenarios | 16 |
 | Active suite jobs | 1 |
-| Total live attempts per suite | 200 by default; explicit bounded override required |
+| Total live attempts per suite | 200 by default; explicit override up to 30,000 (M5) |
 | Attempts per judgment / attempt timeout | 3 total / 10 seconds |
 | Scenario wall-clock deadline | 30 seconds |
 
@@ -998,6 +999,12 @@ Implement strict replay and replay-miss diagnostics, actual Jev HTTP mapping/val
 **Exit:** build → test → change → compare works in mock and recorded replay, the live adapter passes mocked contract tests, exported workflows execute independently, and an optional owner-enabled live smoke validates actual access. If live execution is not performed, say so; do not claim it passed.
 
 Do not start hosted-service work until the local cycle is demonstrated. The next product check is whether representative developers find this more useful than maintaining their own small evaluation harness.
+
+### M5 - Test sets and guided classification evaluation
+
+Import up to 10,000 examples subject to suite/input byte limits, with optional reference labels and their source/review state. Run an explicit sample or full immutable selection, show measured confusion counts, completion/errors, tag slices and row evidence, and export CSV/JSON for external LLM review. Keep graph/JSON authoring available under Advanced. In-app generative analysis is a follow-up.
+
+**Exit:** measured persisted 10,000-example offline run, reviewed/provisional label denominators verified, import/report browser flow demonstrated, partial/canceled/interrupted reports remain honest, and existing replay/security/portable-runtime regressions pass. See `docs/decisions/004-m5-classification-evaluation.md` for the additive contract and bounds.
 
 ## 22. Engineering instructions and deferred decisions
 

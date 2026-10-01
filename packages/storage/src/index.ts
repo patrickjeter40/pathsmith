@@ -1,3 +1,4 @@
+import { MAX_HTTP_ATTEMPTS } from "@pathsmith/contracts";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
@@ -24,6 +25,7 @@ import {
   RUNTIME_VERSION,
   validUsage,
   requestFingerprint,
+  immutable,
   type ExecutionError,
 } from "@pathsmith/core";
 import { createMockProvider } from "@pathsmith/provider-mock";
@@ -32,6 +34,8 @@ import {
   coverage,
   type RunReport,
   type ScenarioResult,
+  type ClassificationFacts,
+  type SummaryFacts,
 } from "@pathsmith/evaluation";
 import { createReplayBindings } from "@pathsmith/provider-replay";
 import { migrate } from "./migrations.js";
@@ -49,6 +53,7 @@ import type {
   ScenarioRunRecord,
   PageOptions,
   Page,
+  RunOverview,
 } from "./types.js";
 export * from "./types.js";
 
@@ -130,6 +135,9 @@ export class SqliteStorage {
   private readonly lock: Database.Database;
   private readonly db: BetterSQLite3Database;
   private closed = false;
+  // Only one active job exists. Never cache mutable job lifecycle or ownership.
+  private appendCache?: { id: string; workspaceId: string; snapshot: RunSnapshot;
+    positions: Map<string, { position: number; inputHash: string }> };
 
   constructor(
     options: {
@@ -521,11 +529,11 @@ export class SqliteStorage {
     if (
       !Number.isSafeInteger(httpAttemptLimit) ||
       httpAttemptLimit < 1 ||
-      httpAttemptLimit > 2000
+      httpAttemptLimit > MAX_HTTP_ATTEMPTS
     )
       throw new StorageError(
         "INVALID_REQUEST",
-        "HTTP attempt limit must be between 1 and 2,000",
+        "HTTP attempt limit must be between 1 and 30,000",
       );
     let profile = input.profile;
     let adapters: RunReport["adapters"];
@@ -709,6 +717,24 @@ export class SqliteStorage {
       throw new StorageError("NOT_FOUND", "Run not found in this workspace");
     return this.runRow(row);
   }
+  getRunOverview(ctx: WorkspaceContext, id: string): RunOverview {
+    const row = this.db.get<RunRow>(sql`SELECT id,workspace_id,project_id,status,created_at,started_at,completed_at,error,
+      json_remove(snapshot,'$.fixtures') AS snapshot,
+      overview AS report,
+      (SELECT COUNT(*) FROM scenario_runs WHERE run_id=runs.id) AS completed_scenarios
+      FROM runs WHERE workspace_id=${ctx.workspaceId} AND id=${id}`);
+    if (!row) throw new StorageError("NOT_FOUND", "Run not found in this workspace");
+    const result = this.runRow(row) as RunOverview;
+    if (result.report) result.report.mixedModel = Boolean(result.report.mixedModel);
+    return result;
+  }
+  listRunOverviews(ctx: WorkspaceContext, options: PageOptions & { projectId?: string } = {}): Page<RunOverview> {
+    const { offset, limit } = pageOptions(options);
+    const where = options.projectId ? sql`workspace_id=${ctx.workspaceId} AND project_id=${options.projectId}` : sql`workspace_id=${ctx.workspaceId}`;
+    const ids = this.db.all<{id:string}>(sql`SELECT id FROM runs WHERE ${where} ORDER BY created_at DESC,rowid DESC LIMIT ${limit} OFFSET ${offset}`);
+    return { offset, limit, total: this.db.get<{total:number}>(sql`SELECT COUNT(*) AS total FROM runs WHERE ${where}`)!.total,
+      items: ids.map(({id}) => this.getRunOverview(ctx,id)) };
+  }
   listRuns(
     ctx: WorkspaceContext,
     options: PageOptions & { projectId?: string } = {},
@@ -767,16 +793,20 @@ export class SqliteStorage {
     runId: string,
     result: ScenarioResult,
   ): ScenarioRunRecord {
-    const run = this.getRun(ctx, runId);
+    const lifecycle = this.db.get<{status: RunStatus; project_id: string}>(sql`SELECT status,project_id FROM runs WHERE workspace_id=${ctx.workspaceId} AND id=${runId}`);
+    if (!lifecycle) throw new StorageError("NOT_FOUND", "Run not found in this workspace");
+    if (!this.appendCache || this.appendCache.id !== runId || this.appendCache.workspaceId !== ctx.workspaceId) {
+      const snapshot = immutable(this.getRun(ctx, runId).snapshot);
+      const selected = new Set(snapshot.selectedScenarioIds);
+      this.appendCache = { id: runId, workspaceId: ctx.workspaceId, snapshot,
+        positions: new Map(snapshot.suite.scenarios.filter((s) => selected.has(s.id)).map((s, position) => [s.id, {position, inputHash: hash(s.input)}])) };
+    }
+    const run = { status: lifecycle.status, projectId: lifecycle.project_id, snapshot: this.appendCache.snapshot };
     if (!["running", "canceling"].includes(run.status))
       throw new StorageError("LIFECYCLE_CONFLICT", "Run is not active");
-    const position = run.snapshot.suite.scenarios
-      .filter((item) => run.snapshot.selectedScenarioIds.includes(item.id))
-      .findIndex((item) => item.id === result.scenarioId);
-    const source = run.snapshot.suite.scenarios.find(
-      (item) => item.id === result.scenarioId,
-    );
-    if (position < 0 || !source || hash(source.input) !== hash(result.input))
+    const membership = this.appendCache.positions.get(result.scenarioId);
+    const position = membership?.position ?? -1;
+    if (!membership || membership.inputHash !== hash(result.input))
       throw new StorageError(
         "INVALID_REQUEST",
         "Scenario result does not match the run snapshot",
@@ -874,9 +904,15 @@ export class SqliteStorage {
         "Exchange provenance does not match the run snapshot",
       );
     const id = randomUUID();
+    const {events:_events,exchanges:_exchanges,outputs:_outputs,...compact}=result;
+    const target=run.snapshot.suite.classification;
+    const nodeAnswer=target ? result.outputs[target.nodeId] : undefined;
+    const classificationAnswer=target && nodeAnswer && typeof nodeAnswer==="object" && !Array.isArray(nodeAnswer)
+      ? nodeAnswer[target.questionId] ?? null : null;
+    const summary=encode({...compact,classificationAnswer});
     this.db.transaction((tx) => {
       tx.run(
-        sql`INSERT INTO scenario_runs VALUES (${id},${ctx.workspaceId},${run.projectId},${runId},${result.scenarioId},${position},${payload})`,
+        sql`INSERT INTO scenario_runs(id,workspace_id,project_id,run_id,scenario_id,position,result,summary) VALUES (${id},${ctx.workspaceId},${run.projectId},${runId},${result.scenarioId},${position},${payload},${summary})`,
       );
       for (const event of result.events)
         tx.run(
@@ -979,9 +1015,10 @@ export class SqliteStorage {
       for (const result of report.scenarios)
         this.appendScenarioResult(ctx, id, result);
       tx.run(
-        sql`UPDATE runs SET status=${report.status},completed_at=${now()},report=${encode(report)},error=${report.error ? encode(report.error) : null} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+        sql`UPDATE runs SET status=${report.status},completed_at=${now()},report=${encode(report)},overview=${encode({summary:report.summary,coverage:report.coverage,adapters:report.adapters,mixedModel:report.mixedModel})},error=${report.error ? encode(report.error) : null} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
       );
     });
+    this.appendCache=undefined;
     return this.getRun(ctx, id);
   }
   failRun(ctx: WorkspaceContext, id: string, error: ExecutionError): RunRecord {
@@ -998,7 +1035,7 @@ export class SqliteStorage {
     runId: string,
     options: PageOptions = {},
   ): Page<ScenarioRunRecord> {
-    this.getRun(ctx, runId);
+    this.assertRunExists(ctx, runId);
     const { offset, limit } = pageOptions(options);
     const rows = this.db.all<{
       id: string;
@@ -1022,6 +1059,43 @@ export class SqliteStorage {
         result: decode(row.result),
       })),
     };
+  }
+  private assertRunExists(ctx: WorkspaceContext, id: string) {
+    if (!this.db.get(sql`SELECT 1 FROM runs WHERE workspace_id=${ctx.workspaceId} AND id=${id}`))
+      throw new StorageError("NOT_FOUND", "Run not found in this workspace");
+  }
+  scenarioSummaryFacts(ctx: WorkspaceContext, runId: string): SummaryFacts[] {
+    this.assertRunExists(ctx, runId);
+    return this.db.all<{result:string}>(sql`SELECT json_remove(summary,'$.attempts','$.input','$.assertions','$.visitedNodes','$.selectedEdges','$.classificationAnswer') AS result
+      FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND run_id=${runId} ORDER BY position`).map((r) => decode<SummaryFacts>(r.result));
+  }
+  observedModels(ctx: WorkspaceContext, runId: string): {binding:string;model:string}[] {
+    this.assertRunExists(ctx,runId);
+    return this.db.all<{binding:string;model:string}>(sql`SELECT DISTINCT
+      json_extract(e.payload,'$.binding') AS binding,json_extract(e.payload,'$.response.model') AS model
+      FROM provider_exchanges e JOIN scenario_runs s ON s.id=e.scenario_run_id
+      WHERE s.workspace_id=${ctx.workspaceId} AND s.run_id=${runId} ORDER BY binding,model`);
+  }
+  classificationFacts(ctx: WorkspaceContext, runId: string, nodeId: string, questionId: string): (ClassificationFacts & {traceId:string})[] {
+    this.assertRunExists(ctx, runId);
+    return this.db.all<{id:string;scenario_id:string;status:string;answer:string|null;error:string|null;attempts:number;elapsed:number}>(sql`SELECT id,scenario_id,
+      json_extract(summary,'$.status') AS status,json_extract(summary,'$.classificationAnswer') AS answer,json_extract(summary,'$.error') AS error,
+      json_extract(summary,'$.actualHttpAttempts') AS attempts,json_extract(summary,'$.elapsedMs') AS elapsed
+      FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND run_id=${runId} ORDER BY position`).map((r) => ({
+        traceId:r.id,scenarioId:r.scenario_id,status:r.status as ScenarioResult["status"],
+        outputs:r.answer ? {[nodeId]:{[questionId]:decode<Json>(r.answer)}} : {},
+        ...(r.error ? {error:decode<ExecutionError>(r.error)} : {}),actualHttpAttempts:r.attempts,elapsedMs:r.elapsed }));
+  }
+  listScenarioSummaries(ctx: WorkspaceContext, runId: string, options: PageOptions & {status?:string;assertionStatus?:string} = {}) {
+    this.assertRunExists(ctx,runId);
+    const {offset,limit}=pageOptions(options);
+    const where=sql`workspace_id=${ctx.workspaceId} AND run_id=${runId}
+      ${options.status ? sql`AND json_extract(summary,'$.status')=${options.status}` : sql``}
+      ${options.assertionStatus ? sql`AND json_extract(summary,'$.assertionStatus')=${options.assertionStatus}` : sql``}`;
+    const rows=this.db.all<{id:string;scenario_id:string;position:number;result:string}>(sql`SELECT id,scenario_id,position,
+      json_remove(summary,'$.classificationAnswer') AS result FROM scenario_runs WHERE ${where} ORDER BY position LIMIT ${limit} OFFSET ${offset}`);
+    return {offset,limit,total:this.db.get<{total:number}>(sql`SELECT COUNT(*) AS total FROM scenario_runs WHERE ${where}`)!.total,
+      items:rows.map((r)=>({id:r.id,runId,scenarioId:r.scenario_id,position:r.position,result:decode<Omit<ScenarioResult,"events"|"exchanges"|"outputs">>(r.result)}))};
   }
   getScenarioTrace(ctx: WorkspaceContext, id: string): ScenarioRunRecord {
     const row = this.db.get<{

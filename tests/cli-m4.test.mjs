@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, truncate, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { candidate, minimal, literal } from "./helpers.mjs";
+import { MAX_REPORT_BYTES } from "@pathsmith/evaluation";
 const suitePath = "examples/support-routing/suite.json";
 const basePath = "examples/support-routing/baseline.workflow.json";
 const candidatePath = "examples/support-routing/candidate.workflow.json";
@@ -170,6 +171,7 @@ test("M4 CLI replay miss writes failed report before exit2; malformed sources fa
   );
   assert.equal(oracle.status, 2);
   assert.equal((await json(out)).error.code, "ARTIFACT_INVALID");
+
 });
 
 test("M4 CLI accepts legacy mock recording fields and rejects bounded import/option violations", async (t) => {
@@ -192,7 +194,7 @@ test("M4 CLI accepts legacy mock recording fields and rejects bounded import/opt
   for (const flags of [
     ["--fixtures", fixturesPath],
     ["--enable-live"],
-    ["--http-attempt-limit", "2001"],
+    ["--http-attempt-limit", "30001"],
     ["--concurrency", "17"],
   ]) {
     assert.equal(env.cli([...replayArgs(env, out), ...flags]).status, 2);
@@ -204,6 +206,13 @@ test("M4 CLI accepts legacy mock recording fields and rejects bounded import/opt
     env.cli(replayArgs({ ...env, sourcePath: huge }, out)).status,
     2,
   );
+  assert.equal((await json(out)).error.code, "ARTIFACT_INVALID");
+  // A valid recording above the former 8 MiB cap is accepted; the new cap is
+  // checked before reading bytes. Sparse oversize input avoids allocating 256 MiB.
+  await writeFile(huge, " ".repeat(8 * 1024 * 1024) + JSON.stringify(legacy));
+  assert.equal(env.cli(replayArgs({ ...env, sourcePath: huge }, out)).status, 1);
+  await truncate(huge, MAX_REPORT_BYTES + 1);
+  assert.equal(env.cli(replayArgs({ ...env, sourcePath: huge }, out)).status, 2);
   assert.equal((await json(out)).error.code, "ARTIFACT_INVALID");
 });
 

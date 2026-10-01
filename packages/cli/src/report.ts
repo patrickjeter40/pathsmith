@@ -1,3 +1,4 @@
+import { MAX_HTTP_ATTEMPTS } from "@pathsmith/contracts";
 import {
   validateProfile,
   validateSuite,
@@ -66,15 +67,17 @@ export function readRunReport(value: unknown): RunReport {
     )
       throw new Error("Invalid snapshots or limits");
     const httpLimit = r.httpAttemptLimit ?? 200;
-    if (!Number.isSafeInteger(httpLimit) || httpLimit < 1 || httpLimit > 2000)
+    if (!Number.isSafeInteger(httpLimit) || httpLimit < 1 || httpLimit > MAX_HTTP_ATTEMPTS)
       throw new Error("Invalid attempt limit");
     // Validates each source/run/scenario/node/binding scope, fingerprint, identity and normalized response.
     createReplayBindings(r);
+    const casesById = new Map(r.suite.scenarios.map((c)=>[c.id,c]));
+    const selected = new Set(r.selectedScenarioIds);
     for (const s of r.scenarios) {
-      const scenario = r.suite.scenarios.find((c) => c.id === s.scenarioId);
+      const scenario = casesById.get(s.scenarioId);
       if (
         !scenario ||
-        !r.selectedScenarioIds.includes(s.scenarioId) ||
+        !selected.has(s.scenarioId) ||
         hash(s.input) !== hash(scenario.input) ||
         !["completed", "failed", "canceled"].includes(s.status) ||
         !["passed", "failed", "not_evaluated"].includes(s.assertionStatus) ||

@@ -1,3 +1,4 @@
+import { MAX_HTTP_ATTEMPTS } from "@pathsmith/contracts";
 import {
   Body,
   Controller,
@@ -16,7 +17,8 @@ import {
   type Workflow,
 } from "@pathsmith/contracts";
 import type { ExecutionLimits, ExecutionMode } from "@pathsmith/core";
-import { LocalApplication } from "./service.js";
+import { CLASSIFICATION_VERDICTS, type ClassificationVerdict } from "@pathsmith/evaluation";
+import { LocalApplication, type ClassificationReport } from "./service.js";
 import {
   badRequest,
   confirmed,
@@ -276,9 +278,9 @@ export class ApiController {
       body.httpAttemptLimit !== undefined &&
       (!Number.isSafeInteger(body.httpAttemptLimit) ||
         (body.httpAttemptLimit as number) < 1 ||
-        (body.httpAttemptLimit as number) > 2000)
+        (body.httpAttemptLimit as number) > MAX_HTTP_ATTEMPTS)
     )
-      badRequest("HTTP attempt limit must be between 1 and 2,000");
+      badRequest("HTTP attempt limit must be between 1 and 30,000");
     if (body.profile !== undefined)
       envelope(
         body.profile,
@@ -357,11 +359,26 @@ export class ApiController {
   }
   @Get("runs/:id") run(@Param("id") id: string) {
     return this.local.view(
-      this.local.storage.getRun(this.local.context, identifier(id)),
+      this.local.storage.getRunOverview(this.local.context, identifier(id)),
     );
   }
   @Get("runs/:id/export") exportRun(@Param("id") id: string) {
     return this.local.exportRun(identifier(id));
+  }
+  @Get("runs/:id/classification") classification(@Param("id") id:string): ClassificationReport {
+    return this.local.classificationReport(identifier(id));
+  }
+  @Get("runs/:id/classification/rows") classificationRows(@Param("id") id:string,@Query() query:Record<string,unknown>) {
+    const page=pagination(query,["verdict","review","tag"]);
+    if (query.verdict!==undefined && !CLASSIFICATION_VERDICTS.includes(query.verdict as ClassificationVerdict)) badRequest("Unknown result filter");
+    if (query.review!==undefined && !["reviewed","provisional"].includes(query.review as string)) badRequest("Unknown label review filter");
+    if (query.tag!==undefined && (typeof query.tag!=="string" || query.tag.length>200)) badRequest("Invalid tag filter");
+    return this.local.classificationRows(identifier(id),{...page,verdict:query.verdict as ClassificationVerdict|undefined,
+      review:query.review as string|undefined,tag:query.tag as string|undefined});
+  }
+  @Get("runs/:id/classification/export") exportClassification(@Param("id") id:string,@Query() query:Record<string,unknown>) {
+    if (Object.keys(query).some((key)=>key!=="format") || !["json","csv"].includes(query.format as string)) badRequest("Select json or csv export format");
+    return this.local.exportClassification(identifier(id),query.format as "json"|"csv");
   }
   @Get("runs/:id/snapshot") snapshot(@Param("id") id: string) {
     return this.local.snapshot(identifier(id));
