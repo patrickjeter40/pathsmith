@@ -1,0 +1,19 @@
+services:
+  pathsmith:
+    build: .
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      PATHSMITH_DATA_DIR: /app/.pathsmith
+      PATHSMITH_HOST: 127.0.0.1
+      PATHSMITH_PORT: "4310"
+      PATHSMITH_WEB_HOST: 0.0.0.0
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      TYPESAFE_MODEL: ${TYPESAFE_MODEL:-jev-latest}
+      PATHSMITH_ENABLE_LIVE: ${PATHSMITH_ENABLE_LIVE:-}
+    volumes:
+      - pathsmith-data:/app/.pathsmith
+    restart: "no"
+
+volumes:
+  pathsmith-data:

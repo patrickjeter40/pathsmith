@@ -10,7 +10,7 @@ Clone this repository and open its root in Codex. The project includes [agent ro
 
 ## Start
 
-Requires **Node 24 LTS** and **pnpm 10.33.0**. Dependencies are pinned in `pnpm-lock.yaml`. SQLite is embedded; `better-sqlite3` may need native build tools during installation. No Docker, separate database service, credentials, or paid requests are needed.
+The host setup requires **Node 24 LTS** and **pnpm 10.33.0**. Dependencies are pinned in `pnpm-lock.yaml`. SQLite is embedded; `better-sqlite3` may need native build tools during host installation. No separate database service, credentials, or paid requests are needed.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -36,6 +36,18 @@ npm install --prefix .tooling --no-save node@24.21.0 pnpm@10.33.0
 ```
 
 Use `Ctrl+C` to stop the development processes. `.env` is optional; `pnpm dev` loads it only into the backend. Mock and replay need no key. Local data defaults to ignored `.pathsmith/`; set `PATHSMITH_DATA_DIR` to a trusted local directory before starting the API to use another location. The API supports `PATHSMITH_HOST` and `PATHSMITH_PORT`; if changing the API port, change the Vite proxy target accordingly. Only one API process may own a data directory at a time.
+
+### Start with Docker Compose
+
+On a device with Docker Engine and Compose, clone the repository and run:
+
+```sh
+docker compose up --build
+```
+
+Open **http://127.0.0.1:5173**. The first build installs the pinned Node 24 and pnpm 10.33.0 toolchain and the locked workspace dependencies, then builds the packages. The container runs the API on its own loopback address and Vite proxies `/api` to it. Compose publishes only the web port on the host's loopback address; use **http://127.0.0.1:5173/api/v1/health** for the containerized health endpoint. Mock and recorded replay work without an `.env` file. Stop with `Ctrl+C`, or run `docker compose down` from another terminal. The named `pathsmith-data` volume keeps projects and runs across container restarts and rebuilds. `docker compose down --volumes` deletes that data.
+
+Compose reads an optional local `.env` for variable substitution and passes `TYPESAFE_API_KEY`, `TYPESAFE_MODEL`, and `PATHSMITH_ENABLE_LIVE` to the backend process. The file is excluded from the image; the launcher removes these values from Vite's environment. For live access, copy `.env.example` to `.env`, set the key and `PATHSMITH_ENABLE_LIVE=1`, then recreate the container with `docker compose up --force-recreate`. Each live run still requires explicit confirmation in the app. Do not put secrets in `VITE_` variables. To pick up source edits in this container setup, rerun `docker compose up --build`; the host `pnpm dev` command provides the regular edit loop.
 
 ## Use the local app
 
