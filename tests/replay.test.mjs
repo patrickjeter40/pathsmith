@@ -40,7 +40,13 @@ test("AC-09/24: source-generated candidate replay preserves provenance, zero new
   assert.deepEqual(result.summary.usage, { inputTokens: 0, outputTokens: 0 });
   assert.equal(result.summary.historicalUsage, null);
   const comparison = compareRuns(source, result);
-  assert.equal(comparison.gate, "fail");
+  assert.equal(comparison.gate, "inconclusive");
+  assert.ok(comparison.issueDetails.some((issue) => issue.code === "MODE_MISMATCH"));
+  const baselineReplay = await replay(baseline);
+  const comparable = compareRuns(baselineReplay, result);
+  assert.equal(comparable.gate, "fail");
+  assert.equal(comparable.newAssertionRegressions, 2);
+  assert.equal(comparable.assertionImprovements, 1);
   assert.equal(comparison.newAssertionRegressions, 2);
   assert.equal(comparison.assertionImprovements, 1);
   assert.equal(comparison.modelChanged, false);

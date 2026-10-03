@@ -162,7 +162,7 @@ test("zero-judgment live and replay reports preserve origin with empty profiles"
     });
     assert.equal(replay.origin, source.origin);
     assert.equal(roundTrip(replay).status, "completed");
-    assert.equal(compareRuns(source, replay).gate, "pass");
+    assert.equal(compareRuns(source, replay).gate, "inconclusive");
     assert.equal(replay.summary.actualHttpAttempts, 0);
     const sourcePath = join(directory, `${mode}.json`),
       workflowPath = join(directory, "workflow.json"),

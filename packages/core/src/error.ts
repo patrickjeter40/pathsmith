@@ -17,6 +17,13 @@ export class PathsmithError extends Error {
     this.name = "PathsmithError";
   }
 }
+/** Internal typed cause; preserves the public limit error taxonomy and diagnostic message. */
+export class PathsmithDeadlineError extends PathsmithError {
+  constructor(message: string) {
+    super("RUN_LIMIT_EXCEEDED", message);
+    this.name = "PathsmithDeadlineError";
+  }
+}
 export function toExecutionError(
   error: unknown,
   nodeId?: string,

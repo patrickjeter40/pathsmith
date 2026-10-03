@@ -6,10 +6,21 @@ import {
   type Workflow,
 } from "@pathsmith/contracts";
 import { WorkflowEditor, type Layout } from "./WorkflowEditor";
+import { WorkflowScreen } from "./WorkflowScreen";
+import { CompareScreen } from "./CompareScreen";
+import { ApiError, request } from "./apiClient";
+import { planWorkflowMerge, resolveWorkflowMerge, type MergeChoice, type WorkflowMergePlan } from "./workflowMerge";
+import type { Json } from "@pathsmith/contracts";
 import { GuidedClassification } from "./GuidedClassification";
+import { ResultsScreen } from "./ResultsScreen";
+import { OverviewScreen } from "./OverviewScreen";
+import { downloadText } from "./apiClient";
+import type { RerunPlan, RunPrefill } from "./screenTypes";
+import AppShell, { type Destination } from "./AppShell";
 import gaming from "../../../examples/gaming/workflow.json";
 import "@xyflow/react/dist/style.css";
 import "./style.css";
+import "./screens.css";
 
 type Project = { id: string; name: string };
 type Draft<T> = {
@@ -21,7 +32,7 @@ type Draft<T> = {
   diagnostics: { code: string; message: string }[];
   layout?: Layout;
 };
-type Version = { id: string; draftRevision: number; createdAt: string };
+type Version = { id: string; draftRevision: number; createdAt: string; definition?: Workflow; layout?: Layout };
 type Example = { id: string; name: string; fixtureSetId: string };
 type Page<T> = { items: T[]; total: number };
 type ProviderStatus = {
@@ -36,7 +47,7 @@ type Run = {
   id: string;
   projectId: string;
   status: string;
-  mode: string;
+  mode: "mock" | "replay" | "live";
   origin: "synthetic" | "live";
   sourceRunId: string | null;
   httpAttemptLimit: number;
@@ -95,95 +106,57 @@ type Snapshot = {
   suite: Suite;
   selectedScenarioIds: string[];
   profile: unknown;
-  mode: string;
+  mode: "mock" | "replay" | "live";
   origin: string;
   adapters?: Record<string, { providerId: string; requestedModel: string; resolvedModels: string[] }>;
 };
-type ComparisonCase = {
-  scenarioId: string;
-  behaviorChanged: boolean;
-  newAssertionRegression: boolean;
-  assertionImprovement: boolean;
-  newExecutionRegression: boolean;
-  unchangedFailure: boolean;
-  firstDivergence: { index: number; baselineEdge: string | null; candidateEdge: string | null } | null;
-  baseline: { status: string; outcome: string | null; assertionStatus: string; assertions: unknown[]; selectedEdges: string[]; visitedNodes: string[] };
-  candidate: { status: string; outcome: string | null; assertionStatus: string; assertions: unknown[]; selectedEdges: string[]; visitedNodes: string[] };
-};
-type Comparison = {
-  gate: "pass" | "fail" | "inconclusive";
-  baselineRunId: string; candidateRunId: string;
-  policy: { strict: boolean; acceptMixedModel: boolean };
-  baselineStatus: string; candidateStatus: string;
-  issues: string[];
-  changedCases: number | null; newAssertionRegressions: number | null;
-  assertionImprovements: number | null; newExecutionRegressions: number | null;
-  modelChanged: boolean | null; workflowChanged: boolean; confounded: boolean | null;
-  workflowDiff: { nodes: { added: string[]; removed: string[]; changed: { id: string; before: unknown; after: unknown }[] }; edges: { added: string[]; removed: string[]; changed: { id: string; before: unknown; after: unknown }[] }; inputSchemaChanged: boolean; outputSchemaChanged: boolean; bindingsChanged: boolean };
-  configurationDiff: { key: string; before: unknown; after: unknown }[];
-  cases: ComparisonCase[];
-};
 type Coverage = { started: number; partial: boolean; nodes: { nodeId: string; visits: number; startedScenarios: number }[]; edges: { edgeId: string; traversals: number; sourceVisits: number }[]; branchPortsVisited: number; branchPortsTotal: number };
+const destinations: Destination[] = ["overview", "testset", "results", "workflow", "compare"];
+function routeDestination(): Destination {
+  const route = window.location.hash.slice(2);
+  const destination = destinations.find((item) => item === route) ?? "overview";
+  if (window.location.hash !== `#/${destination}`) {
+    window.history.replaceState(null, "", `#/${destination}`);
+  }
+  return destination;
+}
 
 async function api<T>(
   path: string,
   method = "GET",
   body?: unknown,
 ): Promise<T> {
-  const response = await fetch(`/api/v1${path}`, {
-    method,
-    headers:
-      method === "GET"
-        ? undefined
-        : { "Content-Type": "application/json", "X-Pathsmith-Client": "local" },
-    body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
-  });
-  const value = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = value.error ?? value;
-    throw new Error(
-      `${error.code ?? response.status}: ${error.message ?? response.statusText}`,
-    );
-  }
-  return value as T;
+  return request<T>(path, method, body);
 }
 const pretty = (value: unknown) => JSON.stringify(value, null, 2);
 const finalStatus = (status: string) =>
   ["completed", "failed", "canceled", "interrupted"].includes(status);
 const modeLabel = (mode: string) => mode === "replay" ? "Recorded Replay" : mode === "live" ? "Live Jev" : "Mock";
-function longestJudgmentPath(workflow: Workflow): number {
-  const outgoing = new Map<string, string[]>();
-  for (const edge of workflow.edges) outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
-  const nodes = new Map(workflow.nodes.map((node) => [node.id, node]));
-  const memo = new Map<string, number>();
-  const visiting = new Set<string>();
-  const count = (id: string): number => {
-    if (memo.has(id)) return memo.get(id)!;
-    if (visiting.has(id)) throw new Error("Published workflow contains a cycle");
-    visiting.add(id);
-    const next = Math.max(0, ...(outgoing.get(id) ?? []).map(count));
-    visiting.delete(id);
-    const result = (nodes.get(id)?.kind === "judgment" ? 1 : 0) + next;
-    memo.set(id, result);
-    return result;
-  };
-  return count(workflow.nodes.find((node) => node.kind === "start")?.id ?? "");
-}
 function usageLabel(usage: Usage): string {
   if (!usage) return "unknown";
   return `input ${usage.inputTokens ?? "unknown"}, output ${usage.outputTokens ?? "unknown"}, total ${usage.totalTokens ?? "unknown"} tokens`;
 }
 function graphable(value: unknown): value is Workflow {
+  const expression = (raw: unknown): boolean => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.op !== "string") return false;
+    if (item.op === "ref") return Array.isArray(item.path) && item.path.every((part) => typeof part === "string");
+    if (Object.hasOwn(item, "left") && !expression(item.left)) return false;
+    if (Object.hasOwn(item, "right") && !expression(item.right)) return false;
+    return true;
+  };
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  if (!Array.isArray(item.nodes) || !Array.isArray(item.edges) || !Array.isArray(item.bindings) || !item.inputSchema || typeof item.inputSchema !== "object") return false;
+  if (!Array.isArray(item.nodes) || !Array.isArray(item.edges) || !Array.isArray(item.bindings) || item.bindings.some((binding) => typeof binding !== "string") || !item.inputSchema || typeof item.inputSchema !== "object" || Array.isArray(item.inputSchema)) return false;
   return item.nodes.every((raw) => {
     if (!raw || typeof raw !== "object") return false;
     const node = raw as Record<string, unknown>;
     if (typeof node.id !== "string" || typeof node.label !== "string") return false;
-    if (node.kind === "branch") return Array.isArray(node.cases) && node.cases.every((entry: unknown) => !!entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).id === "string");
-    if (node.kind === "judgment") return !!node.questions && typeof node.questions === "object" && !Array.isArray(node.questions) && Object.values(node.questions).every((question) => !!question && typeof question === "object" && ["choice", "score", "binary"].includes(String((question as Record<string, unknown>).kind)));
-    return ["start", "transform", "output"].includes(String(node.kind));
+    if (node.kind === "branch") return Array.isArray(node.cases) && node.cases.every((entry: unknown) => { if (!entry || typeof entry !== "object") return false; const branchCase = entry as Record<string, unknown>; return typeof branchCase.id === "string" && expression(branchCase.when); });
+    if (node.kind === "judgment") return expression(node.state) && typeof node.binding === "string" && !!node.questions && typeof node.questions === "object" && !Array.isArray(node.questions) && Object.values(node.questions).every((question) => { if (!question || typeof question !== "object") return false; const q = question as Record<string, unknown>; return typeof q.instructions === "string" && (q.kind === "binary" || q.kind === "choice" && !!q.options && typeof q.options === "object" && !Array.isArray(q.options) && Object.values(q.options).every((description) => typeof description === "string") || q.kind === "score" && Array.isArray(q.levels) && q.levels.every((level) => typeof level === "string")); });
+    if (node.kind === "transform" || node.kind === "output") return expression(node.value) && (node.kind !== "output" || typeof node.outcomeId === "string");
+    return node.kind === "start";
   }) && item.edges.every((raw) => !!raw && typeof raw === "object" && ["id", "source", "port", "target"].every((key) => typeof (raw as Record<string, unknown>)[key] === "string"));
 }
 
@@ -193,7 +166,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
   const [exampleId, setExampleId] = useState("gaming");
-  const [fixtureSetId, setFixtureSetId] = useState("gaming");
+  const [fixtureSetId, setFixtureSetId] = useState("");
   const [workflowDraft, setWorkflowDraft] = useState<Draft<Workflow> | null>(
     null,
   );
@@ -208,8 +181,40 @@ export default function App() {
   const undoStack = useRef<{ text: string; layout: Layout }[]>([]);
   const redoStack = useRef<{ text: string; layout: Layout }[]>([]);
   const [suiteText, setSuiteText] = useState("");
-  const [view, setView] = useState<"graph" | "json">("graph");
-  const [advancedOpen, setAdvancedOpen] = useState(() => window.localStorage.getItem("pathsmith.advancedOpen") === "1");
+  const [testStep, setTestStep] = useState(0);
+  const [testLiveArmed, setTestLiveArmed] = useState(false);
+  const [focusCaseId, setFocusCaseId] = useState("");
+  const [runPrefill, setRunPrefill] = useState<RunPrefill | null>(null);
+  const [scoreVersionId, setScoreVersionId] = useState("");
+  const [startedRunId, setStartedRunId] = useState("");
+  const [projectFileBusy, setProjectFileBusy] = useState(false);
+  const [projectFileAck, setProjectFileAck] = useState(false);
+  const [projectFileMessage, setProjectFileMessage] = useState("");
+  const [destination, setDestination] = useState<Destination>(routeDestination);
+  const compareActionRequest = useRef(0);
+  useEffect(() => {
+    const sync = () => {
+      compareActionRequest.current++;
+      setDestination(routeDestination());
+    };
+    window.addEventListener("hashchange", sync);
+    window.addEventListener("popstate", sync);
+    return () => {
+      window.removeEventListener("hashchange", sync);
+      window.removeEventListener("popstate", sync);
+    };
+  }, []);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    document.getElementById("app-main")?.scrollTo(0, 0);
+  }, [destination]);
+  function navigate(to: Destination) {
+    compareActionRequest.current++;
+    if (window.location.hash !== `#/${to}`) window.history.pushState(null, "", `#/${to}`);
+    setDestination(to);
+    window.scrollTo(0, 0);
+    document.getElementById("app-main")?.scrollTo(0, 0);
+  }
   const [selectedNode, setSelectedNode] = useState("route_content");
   const [selectedCase, setSelectedCase] = useState("");
   const [message, setMessage] = useState("");
@@ -218,11 +223,6 @@ export default function App() {
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [runMode, setRunMode] = useState<"mock" | "replay" | "live">("mock");
   const [sourceRunId, setSourceRunId] = useState("");
-  const [liveConsent, setLiveConsent] = useState(false);
-  const [liveConcurrency, setLiveConcurrency] = useState(4);
-  const [httpAttemptLimit, setHttpAttemptLimit] = useState(200);
-  const [preflight, setPreflight] = useState<{ scenarios: number; model: string; maxJudgments: number; maxLogicalCalls: number; maxAttempts: number } | null>(null);
-  const [preflightError, setPreflightError] = useState("");
   const [exportAcknowledged, setExportAcknowledged] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [comparisonRuns, setComparisonRuns] = useState<Run[]>([]);
@@ -236,22 +236,22 @@ export default function App() {
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [historyView, setHistoryView] = useState<"path" | "coverage">("path");
   const [selectedHistoricalNode, setSelectedHistoricalNode] = useState("");
-  const [comparison, setComparison] = useState<Comparison | null>(null);
-  const [baselineId, setBaselineId] = useState("");
   const [candidateId, setCandidateId] = useState("");
-  const [strictGate, setStrictGate] = useState(false);
-  const [acceptMixedModel, setAcceptMixedModel] = useState(false);
-  const [comparisonFilter, setComparisonFilter] = useState("all");
-  const [selectedComparisonCase, setSelectedComparisonCase] = useState("");
-  const [comparisonSnapshots, setComparisonSnapshots] = useState<{ baseline: Snapshot; candidate: Snapshot } | null>(null);
-  const [comparisonTraces, setComparisonTraces] = useState<{ baseline: unknown; candidate: unknown } | null>(null);
+  const [workflowSaving, setWorkflowSaving] = useState(false);
+  const [workflowConflict, setWorkflowConflict] = useState<{ plan: WorkflowMergePlan; choices: Record<string, MergeChoice>; message: string; revision: number; latest: Draft<Workflow> } | null>(null);
+  const [workflowSnapshot, setWorkflowSnapshot] = useState<{ runId: string; caseId: string; workflowVersionId: string; mode: Run["mode"]; workflow: Workflow; layout: Layout; trace: (import("./SavedTrace").SavedTraceResult & { visitedNodes?: string[]; selectedEdges?: string[] }) | null; status: string } | null>(null);
+  const [focusResultCaseId, setFocusResultCaseId] = useState("");
+  const workflowPathRequest = useRef(0);
+  const coalesceField = useRef("");
   const projectSelection = useRef("");
   const projectRequest = useRef(0);
+  const suiteTextRef = useRef(suiteText);
+  suiteTextRef.current = suiteText;
+  const workflowEditRevision = useRef(0);
   const runSelection = useRef("");
   const runRequest = useRef(0);
   const traceSelection = useRef("");
   const traceRequest = useRef(0);
-  const compareRequest = useRef(0);
   const runPageCount = useRef(50);
   const casePageCount = useRef(100);
 
@@ -267,39 +267,26 @@ export default function App() {
         setExamples(catalog);
         setProjects(saved);
         setProviderStatus(status);
-        setHttpAttemptLimit(status.defaultHttpAttemptLimit);
+        const parameter = new URLSearchParams(window.location.search).get("project");
+        const preferred = [parameter, window.localStorage.getItem("pathsmith.projectId")].find((id) => saved.some((item) => item.id === id));
+        if (preferred) {
+          const name = saved.find((item) => item.id === preferred)?.name;
+          void openProject(preferred, catalog.find((item) => item.name === name)?.fixtureSetId);
+        }
       })
       .catch((error) => {
         setHealth("API unavailable");
         setMessage(String(error));
       });
   }, []);
-  useEffect(() => {
-    if (runMode !== "live" || !workflowVersionId || !suiteVersionId) {
-      setPreflight(null); setPreflightError(""); return;
-    }
-    let active = true;
-    setPreflight(null); setPreflightError("");
-    void Promise.all([
-      api<Workflow>(`/workflow-versions/${workflowVersionId}/export`),
-      api<{ definition: Suite }>(`/suite-versions/${suiteVersionId}`),
-    ]).then(([published, version]) => {
-      if (!active) return;
-      const scenarios = version.definition.scenarios.length;
-      const maxJudgments = longestJudgmentPath(published);
-      const maxLogicalCalls = scenarios * maxJudgments;
-      setPreflight({ scenarios, model: providerStatus?.providers.find((item) => item.id === "jev")?.defaultModel ?? "unknown", maxJudgments, maxLogicalCalls, maxAttempts: maxLogicalCalls * 3 });
-    }).catch((error) => { if (active) setPreflightError(String(error)); });
-    return () => { active = false; };
-  }, [runMode, workflowVersionId, suiteVersionId, providerStatus]);
   async function refreshProjects() {
     setProjects(await api<Project[]>("/projects"));
   }
   async function refreshVersions(workflowId: string, suiteId: string) {
     const generation = projectRequest.current;
     const [w, s] = await Promise.all([
-      api<Version[]>(`/workflows/${workflowId}/versions`),
-      api<Version[]>(`/suites/${suiteId}/versions`),
+      workflowId ? api<Version[]>(`/workflows/${workflowId}/versions`) : Promise.resolve([]),
+      suiteId ? api<Version[]>(`/suites/${suiteId}/versions`) : Promise.resolve([]),
     ]);
     if (projectRequest.current !== generation) return;
     setWorkflowVersions(w);
@@ -328,10 +315,11 @@ export default function App() {
     if (projectSelection.current === id && projectRequest.current === generation) setComparisonRuns(all.items);
     if (selectId) await openRun(selectId);
   }
-  async function openProject(id: string, knownFixture?: string) {
+  async function openProject(id: string, knownFixture?: string, fromCompare = false) {
+    if (!fromCompare) compareActionRequest.current++;
     projectSelection.current = id;
     const generation = ++projectRequest.current;
-    compareRequest.current++;
+    workflowPathRequest.current++;
     runSelection.current = "";
     runRequest.current++;
     traceSelection.current = "";
@@ -348,24 +336,27 @@ export default function App() {
       ]);
       const w = workflows[0],
         s = suites[0];
-      if (!w || !s)
-        throw new Error("Project needs a workflow and suite draft.");
       const [fullW, fullS] = await Promise.all([
-        api<Draft<Workflow>>(`/workflows/${w.id}`),
-        api<Draft<Suite>>(`/suites/${s.id}`),
+        w ? api<Draft<Workflow>>(`/workflows/${w.id}`) : Promise.resolve(null),
+        s ? api<Draft<Suite>>(`/suites/${s.id}`) : Promise.resolve(null),
       ]);
-      if (projectRequest.current !== generation) return;
+      if (projectRequest.current !== generation) return false;
       setProjectId(id);
-      setRunMode("mock"); setSourceRunId(""); setLiveConsent(false); setExportAcknowledged(false);
+      setProjectFileBusy(false); setProjectFileAck(false); setProjectFileMessage("");
+      const address = new URL(window.location.href);
+      address.searchParams.set("project", id);
+      window.history.replaceState(null, "", address);
+      window.localStorage.setItem("pathsmith.projectId", id);
+      setRunMode("mock"); setSourceRunId(""); setExportAcknowledged(false);
       setWorkflowDraft(fullW);
+      setWorkflowConflict(null); setWorkflowSnapshot(null); setWorkflowSaving(false); coalesceField.current = "";
       setSuiteDraft(fullS);
-      setText(pretty(fullW.definition));
-      setLayout(fullW.layout ?? {});
+      setText(pretty(fullW?.definition ?? {}));
+      setLayout(fullW?.layout ?? {});
       undoStack.current = []; redoStack.current = []; setHistoryIndex(0);
-      setSuiteText(pretty(fullS.definition));
-      setSelectedCase(fullS.definition.scenarios?.[0]?.id ?? "");
+      setSuiteText(pretty(fullS?.definition ?? { scenarios: [] }));
+      setSelectedCase(fullS?.definition.scenarios?.[0]?.id ?? "");
       setSelectedNode("");
-      setView("graph");
     setRun(null);
       setSnapshot(null);
       setCaseRuns([]);
@@ -373,48 +364,56 @@ export default function App() {
       setTrace(null);
       setCoverage(null);
       setSelectedHistoricalNode("");
-      setComparison(null);
-      setBaselineId(""); setCandidateId("");
-      setComparisonSnapshots(null); setComparisonTraces(null); setSelectedComparisonCase("");
+      setCandidateId("");
       const selectedProject = projects.find((item) => item.id === id);
       const matchingExample = examples.find(
         (item) => item.name === selectedProject?.name,
       );
-      if (knownFixture || matchingExample)
-        setFixtureSetId(knownFixture ?? matchingExample!.fixtureSetId);
-      await Promise.all([refreshVersions(w.id, s.id), refreshRuns(id)]);
+      const selectedFixture = knownFixture ?? window.localStorage.getItem(`pathsmith.fixtureSet.${id}`) ?? matchingExample?.fixtureSetId ?? "";
+      setFixtureSetId(selectedFixture);
+      if (selectedFixture) window.localStorage.setItem(`pathsmith.fixtureSet.${id}`, selectedFixture);
+      setRunPrefill(null); setScoreVersionId(""); setStartedRunId(""); setTestStep(0); setFocusCaseId("");
+      await Promise.all([refreshVersions(w?.id ?? "", s?.id ?? ""), refreshRuns(id)]);
+      return projectRequest.current === generation;
+    } catch (error) {
+      if (projectRequest.current === generation) setMessage(String(error));
+      return false;
+    } finally {
+      if (projectRequest.current === generation) setBusy(false);
+    }
+  }
+  async function loadExample(selectedId = exampleId) {
+    const generation = projectRequest.current;
+    setBusy(true);
+    setMessage("");
+    try {
+      const loaded = await api<{ project: Project; fixtureSetId: string }>(
+        `/examples/${selectedId}/load`,
+        "POST",
+      );
+      if (projectRequest.current !== generation) return;
+      await refreshProjects();
+      if (projectRequest.current !== generation) return;
+      await openProject(loaded.project.id, loaded.fixtureSetId);
+      if (projectSelection.current === loaded.project.id) setMessage(`Loaded ${loaded.project.name} as a persisted project.`);
     } catch (error) {
       if (projectRequest.current === generation) setMessage(String(error));
     } finally {
       if (projectRequest.current === generation) setBusy(false);
     }
   }
-  async function loadExample() {
-    setBusy(true);
-    setMessage("");
-    try {
-      const loaded = await api<{ project: Project; fixtureSetId: string }>(
-        `/examples/${exampleId}/load`,
-        "POST",
-      );
-      await refreshProjects();
-      await openProject(loaded.project.id, loaded.fixtureSetId);
-      setMessage(`Loaded ${loaded.project.name} as a persisted project.`);
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(false);
-    }
-  }
   async function loadClassification() {
+    const generation = projectRequest.current;
     setBusy(true); setMessage("");
     try {
       const loaded = await api<{ project: Project; fixtureSetId: string }>("/examples/classification/load", "POST");
+      if (projectRequest.current !== generation) return;
       await refreshProjects();
+      if (projectRequest.current !== generation) return;
       await openProject(loaded.project.id, loaded.fixtureSetId);
-      setMessage("Loaded the chat abuse classification example.");
-    } catch (error) { setMessage(String(error)); }
-    finally { setBusy(false); }
+      if (projectSelection.current === loaded.project.id) setMessage("Loaded the chat abuse classification example.");
+    } catch (error) { if (projectRequest.current === generation) setMessage(String(error)); }
+    finally { if (projectRequest.current === generation) setBusy(false); }
   }
   const validation = useMemo(() => {
     try {
@@ -422,7 +421,7 @@ export default function App() {
       const result = validateWorkflow(value);
       return {
         result,
-        workflow: !result.diagnostics.some((item) => item.code === "SCHEMA_INVALID" || item.code === "UNSUPPORTED_FORMAT") && graphable(value) ? value : null,
+        workflow: graphable(value) ? value : null,
       };
     } catch (error) {
       return {
@@ -456,27 +455,58 @@ export default function App() {
     !!workflowDraft && (text !== pretty(workflowDraft.definition) || pretty(layout) !== pretty(workflowDraft.layout ?? {}));
   const suiteDirty =
     !!suiteDraft && suiteText !== pretty(suiteDraft.definition);
-  function editDefinition(value: string) {
-    undoStack.current.push({ text, layout });
+  const currentProjectReady = !busy && projectSelection.current === projectId;
+  const ownerReadyAtEntry = () => !busy && projectSelection.current === projectId;
+  function editDefinition(value: string, field?: string) {
+    const focus = document.activeElement as HTMLElement | null;
+    const typing = field ?? (focus && ["INPUT", "TEXTAREA"].includes(focus.tagName) ? `${selectedNode}:${focus.getAttribute("aria-label") ?? ""}` : "");
+    if (!typing || coalesceField.current !== typing) undoStack.current.push({ text, layout });
+    coalesceField.current = typing;
+    workflowEditRevision.current++;
     redoStack.current = [];
     setText(value); setHistoryIndex((index) => index + 1);
   }
   function editLayout(value: Layout) {
+    coalesceField.current = "";
+    workflowEditRevision.current++;
     undoStack.current.push({ text, layout });
     redoStack.current = [];
     setLayout(value); setHistoryIndex((index) => index + 1);
   }
+  function editWorkflowDocument(definition: Workflow, nextLayout: Layout) {
+    coalesceField.current = "";
+    workflowEditRevision.current++;
+    undoStack.current.push({ text, layout }); redoStack.current = [];
+    setText(pretty(definition)); setLayout(nextLayout); setHistoryIndex((index) => index + 1);
+  }
   function travel(direction: "undo" | "redo") {
+    if (workflowSaving || workflowSnapshot || workflowConflict) return;
+    coalesceField.current = "";
     const source = direction === "undo" ? undoStack : redoStack;
     const target = direction === "undo" ? redoStack : undoStack;
     const previous = source.current.pop();
     if (!previous) return;
+    workflowEditRevision.current++;
     target.current.push({ text, layout });
     setText(previous.text); setLayout(previous.layout);
     setHistoryIndex((index) => index + 1);
   }
+  useEffect(() => {
+    if (destination !== "workflow") return;
+    const keydown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z" || workflowSaving || workflowSnapshot || workflowConflict) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input,textarea,select,[contenteditable=true]") || !document.getElementById("workflow")?.contains(target)) return;
+      event.preventDefault(); travel(event.shiftKey ? "redo" : "undo");
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  });
   async function saveWorkflow() {
-    if (!workflowDraft) return;
+    if (!workflowDraft || !ownerReadyAtEntry() || workflowDraft.projectId !== projectId || workflowSaving || workflowSnapshot || workflowConflict) return;
+    const generation = projectRequest.current, ownerId = workflowDraft.projectId;
+    const currentOwner = () => projectRequest.current === generation && projectSelection.current === ownerId;
+    const editorRevision = workflowEditRevision.current;
     setMessage("");
     setConflict("");
     try {
@@ -486,11 +516,12 @@ export default function App() {
         "PUT",
         { expectedRevision: workflowDraft.draftRevision, definition, layout },
       );
+      if (!currentOwner() || saved.id !== workflowDraft.id || saved.projectId !== ownerId) return;
       setWorkflowDraft(saved);
-      setText(pretty(saved.definition));
-      setLayout(saved.layout ?? layout);
+      if (workflowEditRevision.current === editorRevision) { setText(pretty(saved.definition)); setLayout(saved.layout ?? layout); }
       setMessage(`Workflow draft saved at revision ${saved.draftRevision}.`);
     } catch (error) {
+      if (!currentOwner()) return;
       const detail = String(error);
       if (detail.includes("CONFLICT"))
         setConflict(
@@ -499,23 +530,72 @@ export default function App() {
       else setMessage(detail);
     }
   }
-  async function publishWorkflow() {
-    if (!workflowDraft || workflowDirty) return;
+  async function saveWorkflowVersion() {
+    if (!workflowDraft || !ownerReadyAtEntry() || workflowDraft.projectId !== projectId || !workflow || !validation.result.valid || workflowSaving || workflowSnapshot) return;
+    const owner = projectRequest.current, workflowId = workflowDraft.id, ownerId = projectId;
+    const editorRevision = workflowEditRevision.current;
+    const owns = () => projectRequest.current === owner && projectSelection.current === ownerId;
+    const submitted = { definition: workflow as unknown as Json, layout: layout as Json };
+    const base = { definition: workflowDraft.definition as unknown as Json, layout: (workflowDraft.layout ?? {}) as Json };
+    setWorkflowSaving(true); setWorkflowConflict(null); setMessage("");
     try {
-      const version = await api<Version>(
-        `/workflows/${workflowDraft.id}/versions`,
-        "POST",
-        { expectedRevision: workflowDraft.draftRevision },
-      );
-      await refreshVersions(workflowDraft.id, suiteDraft!.id);
-      setWorkflowVersionId(version.id);
-      setMessage(`Workflow version ${version.id} published.`);
+      const saved = await api<{ draft: Draft<Workflow>; version: Version }>(`/workflows/${workflowId}/save-version`, "POST", { expectedRevision: workflowDraft.draftRevision, ...submitted });
+      if (!owns()) return;
+      setWorkflowDraft(saved.draft); setWorkflowVersionId(saved.version.id);
+      setWorkflowVersions((list) => [saved.version, ...list.filter((item) => item.id !== saved.version.id)]);
+      if (workflowEditRevision.current === editorRevision) { setText(pretty(saved.draft.definition)); setLayout(saved.draft.layout ?? layout); }
+      setMessage(`Saved executable workflow version ${saved.version.id.slice(0, 8)}.`);
     } catch (error) {
-      setMessage(String(error));
-    }
+      if (!owns()) return;
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          const latest = await api<Draft<Workflow>>(`/workflows/${workflowId}`);
+          if (!owns()) return;
+          const plan = planWorkflowMerge(base, submitted, { definition: latest.definition as unknown as Json, layout: (latest.layout ?? {}) as Json });
+          setWorkflowConflict({ plan, choices: {}, message: `Draft revision ${latest.draftRevision} was saved in another window. Review all changes before publishing.`, revision: latest.draftRevision, latest });
+        } catch (failure) { if (owns()) setMessage(`Conflict inspection failed; your draft is retained. ${String(failure)}`); }
+      } else setMessage(`Workflow version was not saved. ${String(error)}`);
+    } finally { if (owns()) setWorkflowSaving(false); }
+  }
+  async function resolveWorkflowConflict() {
+    if (!workflowConflict || !workflowDraft || !ownerReadyAtEntry() || workflowSaving || workflowSnapshot) return;
+    const conflictAtStart = workflowConflict, owner = projectRequest.current, ownerId = projectId, workflowId = workflowDraft.id;
+    const owns = () => projectRequest.current === owner && projectSelection.current === ownerId;
+    const resolved = resolveWorkflowMerge(conflictAtStart.plan, conflictAtStart.choices);
+    if (!resolved.document || resolved.unresolved.length || !resolved.valid) { setWorkflowConflict({ ...conflictAtStart, message: resolved.unresolved.length ? `Choose how to resolve: ${resolved.unresolved.join(", ")}` : resolved.diagnostics.map((item) => item.message).join("; ") || "Merged workflow is invalid." }); return; }
+    setWorkflowSaving(true);
+    try {
+      const saved = await api<{ draft: Draft<Workflow>; version: Version }>(`/workflows/${workflowId}/save-version`, "POST", { expectedRevision: conflictAtStart.revision, ...resolved.document });
+      if (!owns()) return;
+      setWorkflowConflict(null); setWorkflowDraft(saved.draft); setText(pretty(saved.draft.definition)); setLayout(saved.draft.layout ?? {}); workflowEditRevision.current++;
+      setWorkflowVersionId(saved.version.id); setWorkflowVersions((list) => [saved.version, ...list.filter((item) => item.id !== saved.version.id)]);
+      setMessage(`Conflict resolved and saved as executable version ${saved.version.id.slice(0, 8)}.`);
+    } catch (error) {
+      if (!owns()) return;
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          const latest = await api<Draft<Workflow>>(`/workflows/${workflowId}`);
+          if (!owns()) return;
+          setText(pretty(resolved.document.definition)); setLayout(resolved.document.layout as Layout); workflowEditRevision.current++;
+          setWorkflowConflict({ plan: planWorkflowMerge(conflictAtStart.plan.sources!.remote, resolved.document, { definition: latest.definition as unknown as Json, layout: (latest.layout ?? {}) as Json }), choices: {}, revision: latest.draftRevision, latest, message: `A newer revision ${latest.draftRevision} arrived during resolution. Your resolved candidate is retained; review the new changes.` });
+        } catch (failure) { if (owns()) setMessage(`A second conflict occurred. Your candidate is retained. ${String(failure)}`); }
+      } else setWorkflowConflict({ ...conflictAtStart, message: `Resolution was not saved. ${String(error)}` });
+    } finally { if (owns()) setWorkflowSaving(false); }
+  }
+  function editMergedWorkflowDraft() {
+    if (!workflowConflict || workflowSaving || workflowSnapshot || !ownerReadyAtEntry()) return;
+    const resolved = resolveWorkflowMerge(workflowConflict.plan, workflowConflict.choices);
+    if (!resolved.document || resolved.unresolved.length) { setWorkflowConflict((current) => current ? { ...current, message: "Choose how to resolve every conflict before editing the combined draft." } : null); return; }
+    setWorkflowDraft(workflowConflict.latest);
+    editWorkflowDocument(resolved.document.definition as unknown as Workflow, resolved.document.layout as Layout);
+    setWorkflowConflict(null);
+    setMessage("Merged candidate is now an editable local draft based on the latest saved revision. Repair its problems before saving a version.");
   }
   async function saveSuite() {
-    if (!suiteDraft) return;
+    if (!suiteDraft || !ownerReadyAtEntry() || suiteDraft.projectId !== projectId) return;
+    const generation = projectRequest.current, ownerId = suiteDraft.projectId;
+    const currentOwner = () => projectRequest.current === generation && projectSelection.current === ownerId;
+    const submittedText = suiteText;
     setMessage("");
     setConflict("");
     try {
@@ -529,10 +609,12 @@ export default function App() {
           workflowVersionId,
         },
       );
+      if (!currentOwner() || saved.id !== suiteDraft.id || saved.projectId !== ownerId) return;
       setSuiteDraft(saved);
-      setSuiteText(pretty(saved.definition));
+      if (suiteTextRef.current === submittedText) setSuiteText(pretty(saved.definition));
       setMessage(`Suite draft saved at revision ${saved.draftRevision}.`);
     } catch (error) {
+      if (!currentOwner()) return;
       const detail = String(error);
       if (detail.includes("CONFLICT"))
         setConflict(
@@ -542,22 +624,26 @@ export default function App() {
     }
   }
   async function publishSuite() {
-    if (!suiteDraft || suiteDirty || !workflowVersionId) return;
+    if (!suiteDraft || suiteDirty || !workflowVersionId || !ownerReadyAtEntry() || suiteDraft.projectId !== projectId) return;
+    const generation = projectRequest.current, ownerId = suiteDraft.projectId;
+    const currentOwner = () => projectRequest.current === generation && projectSelection.current === ownerId;
     try {
       const version = await api<Version>(
         `/suites/${suiteDraft.id}/versions`,
         "POST",
         { expectedRevision: suiteDraft.draftRevision, workflowVersionId },
       );
-      await refreshVersions(workflowDraft!.id, suiteDraft.id);
+      if (!currentOwner()) return;
+      await refreshVersions(workflowDraft?.id ?? "", suiteDraft.id);
+      if (!currentOwner()) return;
       setSuiteVersionId(version.id);
       setMessage(`Suite version ${version.id} published.`);
     } catch (error) {
-      setMessage(String(error));
+      if (currentOwner()) setMessage(String(error));
     }
   }
   function editScenario(field: "input" | "expected", value: string) {
-    if (!suite || !scenario) return;
+    if (!ownerReadyAtEntry() || !suite || !scenario) return;
     try {
       const updated = parseJson(value, 64 * 1024);
       const next = {
@@ -572,31 +658,15 @@ export default function App() {
       setMessage(`${field} JSON was not applied: ${String(error)}`);
     }
   }
-  async function startRun(single: boolean) {
-    if (!projectId || !workflowVersionId || !suiteVersionId) return;
-    if (runMode === "live" && (!liveConsent || !providerStatus?.allowedModes.includes("live") || !preflight)) return;
-    if (runMode === "replay" && !sourceRunId) return;
-    setMessage("");
-    try {
-      const queued = await api<Run>("/runs", "POST", {
-        workflowVersionId,
-        suiteVersionId,
-        mode: runMode,
-        ...(runMode === "mock" ? { fixtureSetId } : {}),
-        ...(runMode === "replay" ? { sourceRunId } : {}),
-        ...(runMode === "live" ? { confirmLive: true, concurrency: liveConcurrency, httpAttemptLimit } : {}),
-        ...(single ? { selectedScenarioIds: [selectedCase] } : {}),
-      });
-      if (runMode === "live") setLiveConsent(false);
-      await refreshRuns(projectId, queued.id);
-      setMessage(
-        `Queued ${modeLabel(runMode)} ${single ? "case" : "suite"} run. Edits after publication are not included.`,
-      );
-    } catch (error) {
-      setMessage(String(error));
-    }
+  function prepareAdvancedRun(single: boolean) {
+    if (!workflowVersionId || !suiteVersionId || (single && !selectedCase)) return;
+    setRunPrefill({ from: "advanced setup", title: single ? `Run selected case ${selectedCase}` : "Run full published test set",
+      workflowVersionId, suiteVersionId, mode: runMode, sourceRunId,
+      selectedScenarioIds: single ? [selectedCase] : undefined });
+    setTestStep(2); navigate("testset");
   }
   async function openRun(id: string) {
+    if (runSelection.current !== id) { workflowPathRequest.current++; setWorkflowSnapshot(null); }
     const changed = runSelection.current !== id;
     runSelection.current = id;
     const generation = ++runRequest.current;
@@ -676,39 +746,6 @@ export default function App() {
       if (traceRequest.current === generation) setMessage(String(error));
     }
   }
-  async function compare() {
-    if (!baselineId || !candidateId) return;
-    const generation = ++compareRequest.current;
-    setComparison(null); setComparisonSnapshots(null); setSelectedComparisonCase(""); setComparisonTraces(null);
-    try {
-      const result = await api<Comparison>("/comparisons", "POST", { baselineRunId: baselineId, candidateRunId: candidateId, policy: { strict: strictGate, acceptMixedModel } });
-      const [baseline, candidate] = await Promise.all([api<Snapshot>(`/runs/${baselineId}/snapshot`), api<Snapshot>(`/runs/${candidateId}/snapshot`)]);
-      if (compareRequest.current !== generation) return;
-      setComparison(result); setComparisonSnapshots({ baseline, candidate });
-      setMessage("");
-    } catch (error) { if (compareRequest.current === generation) setMessage(String(error)); }
-  }
-  function clearComparison() {
-    compareRequest.current++;
-    setComparison(null);
-    setComparisonSnapshots(null);
-    setSelectedComparisonCase("");
-    setComparisonTraces(null);
-  }
-  async function selectComparisonCase(id: string) {
-    if (!comparison) return;
-    setSelectedComparisonCase(id); setComparisonTraces(null);
-    const generation = ++compareRequest.current;
-    try {
-      const [a, b] = await Promise.all([
-        fetchPages<CaseRun>(`/runs/${comparison.baselineRunId}/scenarios`, 1000),
-        fetchPages<CaseRun>(`/runs/${comparison.candidateRunId}/scenarios`, 1000),
-      ]);
-      const ids = [a.items.find((item) => item.scenarioId === id)?.id, b.items.find((item) => item.scenarioId === id)?.id];
-      const [baseline, candidate] = await Promise.all(ids.map((caseId) => caseId ? api(`/scenario-runs/${caseId}/trace`) : Promise.resolve(null)));
-      if (compareRequest.current === generation) setComparisonTraces({ baseline, candidate });
-    } catch (error) { if (compareRequest.current === generation) setMessage(String(error)); }
-  }
   async function loadMoreRuns() {
     if (!projectId) return;
     runPageCount.current += 50;
@@ -721,25 +758,26 @@ export default function App() {
   }
   async function importFile(file?: File) {
     if (!file) return;
+    const generation = projectRequest.current, ownerId = projectSelection.current;
     if (file.size > 512 * 1024) {
       setMessage("Import exceeds 512 KiB. Current definition preserved.");
       return;
     }
     try {
       const imported = await file.text();
+      if (projectRequest.current !== generation || projectSelection.current !== ownerId) return;
       const value = parseJson(imported, 512 * 1024);
       const result = validateWorkflow(value);
       if (!result.valid)
         throw new Error(
           result.diagnostics.map((item) => item.message).join("; "),
         );
-      setText(imported);
-      setView("json");
+      editWorkflowDocument(value as unknown as Workflow, layout);
       setMessage(
         "Valid workflow imported into the local editor. Save the draft to persist it.",
       );
     } catch (error) {
-      setMessage(
+      if (projectRequest.current === generation && projectSelection.current === ownerId) setMessage(
         `Import failed; current definition preserved. ${String(error)}`,
       );
     }
@@ -755,45 +793,116 @@ export default function App() {
     link.click();
     URL.revokeObjectURL(url);
   }
+  async function importProjectFile(file?: File) {
+    if (!file) return;
+    const generation = projectRequest.current;
+    setProjectFileBusy(true); setProjectFileMessage("");
+    try {
+      if (file.size > 8 * 1024 * 1024) throw new Error("Project file exceeds 8 MiB.");
+      const artifact: unknown = JSON.parse(await file.text());
+      if (projectRequest.current !== generation) return;
+      const result = await api<{ project: Project; workflows: Draft<Workflow>[]; suites: Draft<Suite>[] }>("/projects/import", "POST", { artifact });
+      if (projectRequest.current !== generation) return;
+      await refreshProjects();
+      if (projectRequest.current !== generation) return;
+      await openProject(result.project.id);
+      if (projectSelection.current === result.project.id) setProjectFileMessage(`Imported ${result.project.name} as a new local project. ${result.workflows.length} workflow drafts and ${result.suites.length} test-set drafts; validate and publish before running.`);
+    } catch (error) { if (projectRequest.current === generation) setProjectFileMessage(`Import failed. ${String(error)}`); }
+    finally { if (projectRequest.current === generation) setProjectFileBusy(false); }
+  }
+  async function exportProjectFile() {
+    if (!projectId || !projectFileAck) return;
+    const generation = projectRequest.current, ownerId = projectId;
+    setProjectFileBusy(true); setProjectFileMessage("");
+    try {
+      const artifact = await api<unknown>(`/projects/${projectId}/export`);
+      if (projectRequest.current !== generation || projectSelection.current !== ownerId) return;
+      downloadText(pretty(artifact), `pathsmith-project-${ownerId.slice(0, 8)}.json`);
+      setProjectFileAck(false);
+    } catch (error) { if (projectRequest.current === generation) setProjectFileMessage(`Export failed. ${String(error)}`); }
+    finally { if (projectRequest.current === generation) setProjectFileBusy(false); }
+  }
+  function configureRun(record: Run, latest: boolean) {
+    setRunPrefill({ from: record.id, title: latest ? `Re-run latest versions` : `Adjust ${record.id}`,
+      workflowVersionId: latest ? workflowVersionId : record.workflowVersionId,
+      suiteVersionId: latest ? suiteVersionId : record.suiteVersionId,
+      mode: record.mode as "mock" | "replay" | "live", sourceRunId: record.sourceRunId,
+      selectedScenarioIds: latest ? undefined : snapshot?.selectedScenarioIds });
+    setTestStep(2); navigate("testset");
+  }
+  async function resumeRun(record: Run) {
+    const generation = projectRequest.current, ownerId = projectSelection.current;
+    try {
+      const plan = await api<RerunPlan>(`/runs/${record.id}/rerun-plan`);
+      if (projectRequest.current !== generation || projectSelection.current !== ownerId || runSelection.current !== record.id) return;
+      setRunPrefill({ from: record.id, title: `Run remaining cases from ${record.id.slice(0, 8)}`,
+        workflowVersionId: plan.workflowVersionId, suiteVersionId: plan.suiteVersionId,
+        selectedScenarioIds: plan.selectedScenarioIds, mode: plan.mode, sourceRunId: plan.sourceRunId, rerunPlan: plan });
+      setTestStep(2); navigate("testset");
+    } catch (error) { if (projectRequest.current === generation && projectSelection.current === ownerId) setMessage(String(error)); }
+  }
+  async function openWorkflowPath(caseId: string, traceId?: string | null) {
+    if (!run || !snapshot || !caseId) return;
+    const generation = ++workflowPathRequest.current, selectedRunId = run.id, owner = projectRequest.current;
+    const owns = () => workflowPathRequest.current === generation && runSelection.current === selectedRunId && projectRequest.current === owner;
+    setWorkflowSnapshot({ runId: selectedRunId, caseId, workflowVersionId: run.workflowVersionId, mode: run.mode, workflow: snapshot.workflow, layout: snapshot.layout ?? {}, trace: null, status: traceId ? "loading saved path" : "without a saved path" });
+    setSelectedNode(""); navigate("workflow");
+    if (!traceId) return;
+    try {
+      const record = await api<{ id: string; runId: string; scenarioId: string; result: import("./SavedTrace").SavedTraceResult & { visitedNodes?: string[]; selectedEdges?: string[]; status?: string } }>(`/scenario-runs/${traceId}/trace`);
+      if (!owns() || record.id !== traceId || record.runId !== selectedRunId || record.scenarioId !== caseId) return;
+      setWorkflowSnapshot({ runId: selectedRunId, caseId, workflowVersionId: run.workflowVersionId, mode: run.mode, workflow: snapshot.workflow, layout: snapshot.layout ?? {}, trace: record.result, status: record.result.status ?? "saved" });
+    } catch (error) { if (owns()) { setWorkflowSnapshot((current) => current?.caseId === caseId ? { ...current, status: "trace unavailable" } : current); setMessage(`Saved path could not be loaded: ${String(error)}`); } }
+  }
+
+  async function comparisonOwnerReady(owner: string, action: number) {
+    if (compareActionRequest.current !== action) return false;
+    if (projectSelection.current !== owner) {
+      const before = projectRequest.current;
+      const loaded = await openProject(owner, undefined, true);
+      if (!loaded || projectRequest.current !== before + 1) return false;
+    }
+    return compareActionRequest.current === action && projectSelection.current === owner;
+  }
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <a className="brand" href="/">
-          p<span>Pathsmith</span>
-        </a>
-        <div className="sidebar-caption">LOCAL WORKSPACE</div>
-        <nav>
-          <a href="#projects">Projects</a>
-          <a href="#workflow">Workflow</a>
-          <a href="#scenarios">Scenarios</a>
-          <a href="#runs">Runs</a>
-        </nav>
-        <div className="sidebar-footer">
-          <span className="dot" />
-          {health}
-          <p>M5 · guided classification tests</p>
+    <AppShell active={destination} navigate={navigate}
+      projectName={projects.find((item) => item.id === projectId)?.name ?? "Local workspace"}
+      workflowName={workflowDraft?.name} version={workflowVersionId ? workflowVersionId.slice(0, 8) : undefined}
+      health={health} liveArmed={destination === "testset" && testLiveArmed}>
+      <div className="page-content">
+        {destination === "overview" && <OverviewScreen projectId={projectId} projects={projects} examples={examples}
+          workflowDraft={workflowDraft} suiteDraft={suiteDraft} workflowVersionId={workflowVersionId} suiteVersionId={suiteVersionId}
+          runs={runs} busy={busy || projectFileBusy} fileMessage={projectFileMessage} fileAck={projectFileAck} onFileAck={setProjectFileAck}
+          onOpenProject={async (id) => { await openProject(id); }} onLoadStarter={loadClassification} onLoadExample={loadExample}
+          onImportFile={importProjectFile} onExportFile={exportProjectFile}
+          onStep={(step) => { setTestStep(Math.min(step, 2)); navigate(step === 3 ? "results" : "testset"); }}
+          onOpenRun={(id) => { void openRun(id); navigate("results"); }} onWorkflow={() => navigate("workflow")} onCompare={() => navigate("compare")} />}
+        {destination === "compare" && <div className="page-heading"><div><span className="eyebrow">PATHSMITH</span><h1>Compare</h1></div></div>}
+        <div className={destination === "testset" ? "" : "destination-hidden"}>
+        <GuidedClassification projectId={projectId} projects={projects} suiteDraft={suiteDraft} suiteDirty={suiteDirty} workflowVersionId={workflowVersionId} suiteVersionId={suiteVersionId} fixtureSetId={fixtureSetId}
+          fixtureSets={[...new Set(examples.map((item) => item.fixtureSetId))]} onFixtureSetChange={(id) => { setFixtureSetId(id); if (projectId) window.localStorage.setItem(`pathsmith.fixtureSet.${projectId}`, id); }}
+          run={run} runs={runs} providerStatus={providerStatus}
+          step={testStep} focusCaseId={focusCaseId} prefill={runPrefill} onStep={setTestStep}
+          ownerGeneration={projectRequest.current} ownerReady={!busy && projectSelection.current === projectId}
+          isOwnerCurrent={(generation, ownerId, suiteId) => generation === projectRequest.current && projectSelection.current === ownerId && suiteDraft?.id === suiteId}
+          onLiveModeChange={setTestLiveArmed}
+          onLoadStarter={loadClassification} onOpenProject={async (id) => { await openProject(id); }}
+          onSuiteDraftSaved={(draft, generation) => { if (generation !== projectRequest.current || projectSelection.current !== draft.projectId || suiteDraft?.id !== draft.id) return; if (suiteTextRef.current === pretty(suiteDraft.definition)) setSuiteText(pretty(draft.definition)); setSuiteDraft(draft); }}
+          onSuitePublished={(draft, version, generation) => { if (generation !== projectRequest.current || projectSelection.current !== draft.projectId || suiteDraft?.id !== draft.id) return; if (suiteTextRef.current === pretty(suiteDraft.definition)) setSuiteText(pretty(draft.definition)); setSuiteDraft((current) => current ? { ...current, ...draft } : current); setSuiteVersions((current) => [version, ...current]); setSuiteVersionId(version.id); }}
+          onRunQueued={async (id, generation) => { if (generation !== projectRequest.current || !projectId || projectSelection.current !== projectId) return; setStartedRunId(id); setScoreVersionId(""); await refreshRuns(projectId, id); if (generation === projectRequest.current && projectSelection.current === projectId) navigate("results"); }}
+          onClearPrefill={() => setRunPrefill(null)} onViewResults={(version) => { setScoreVersionId(version ?? ""); navigate("results"); }} />
         </div>
-      </aside>
-      <main>
-        <header>
-          <div>
-            <span className="breadcrumb">
-              {projectId
-                ? projects.find((item) => item.id === projectId)?.name
-                : "Pathsmith / Local workspace"}
-            </span>
-            <h1>Test how your classifier performs.</h1>
-          </div>
-          <span className={`mode mode-${runMode}`}>● {modeLabel(runMode).toUpperCase()}{runMode === "mock" ? " · OFFLINE" : runMode === "replay" ? " · NO NEW HTTP" : " · EXTERNAL REQUESTS"}</span>
-        </header>
-        <GuidedClassification projectId={projectId} projects={projects} suiteDraft={suiteDraft} suiteDirty={suiteDirty} workflowVersionId={workflowVersionId} suiteVersionId={suiteVersionId} run={run} runs={runs} providerStatus={providerStatus}
-          onLoadStarter={loadClassification} onOpenProject={openProject}
-          onSuitePublished={(draft, version) => { setSuiteDraft((current) => current ? { ...current, ...draft } : current); setSuiteText(pretty(draft.definition)); setSuiteVersions((current) => [version, ...current]); setSuiteVersionId(version.id); }}
-          onRunQueued={async (id) => { if (projectId) await refreshRuns(projectId, id); }} onSelectRun={openRun} />
-        <details className="advanced" open={advancedOpen} onToggle={(event) => { const open = event.currentTarget.open; setAdvancedOpen(open); window.localStorage.setItem("pathsmith.advancedOpen", open ? "1" : "0"); }}><summary>Advanced: graph, JSON, versions, traces and comparisons</summary>
-        {advancedOpen && <>
-        <section className="m2-panel" id="projects">
+        <div className={destination === "results" ? "" : "destination-hidden"}>
+          <ResultsScreen run={run} runs={runs} snapshot={snapshot} caseRuns={caseRuns} caseTotal={caseTotal} focusCaseId={focusResultCaseId}
+            scoreVersionId={scoreVersionId} startedRunId={startedRunId} onSelectRun={async (id) => { setFocusResultCaseId(""); await openRun(id); }} onCancelRun={cancelRun}
+            onLoadMoreCases={loadMoreCases} onReviewLabel={(id) => { setFocusCaseId(id); setTestStep(1); navigate("testset"); }}
+            onConfigureRun={configureRun} onResume={(record) => { void resumeRun(record); }}
+            onCompare={(id) => { setCandidateId(id); navigate("compare"); }}
+            onUseOriginalLabels={() => setScoreVersionId("")} onViewWorkflow={(caseId, traceId) => { void openWorkflowPath(caseId, traceId); }} />
+        </div>
+        <div className="destination-content">
+        <section className="destination-hidden" id="projects">
           <div className="section-heading">
             <div>
               <span className="eyebrow">PERSISTED WORKSPACE</span>
@@ -855,93 +964,21 @@ export default function App() {
             {conflict}
           </p>
         )}
-        <section className="workspace" id="workflow">
-          <div className="toolbar">
-            <div>
-              <span className="eyebrow">WORKFLOW</span>
-              <h2>{workflowDraft?.name ?? "Gaming preview"}</h2>
-            </div>
-            <div className="toolbar-actions">
-              <label className="button">
-                Import JSON
-                <input
-                  aria-label="Import workflow JSON"
-                  type="file"
-                  accept=".json"
-                  onChange={(event) => void importFile(event.target.files?.[0])}
-                />
-              </label>
-              <button disabled={!validation.result.valid || !workflow} onClick={exportFile}>
-                Export workflow
-              </button>
-              <button aria-label="Undo edit" disabled={undoStack.current.length === 0} onClick={() => travel("undo")}>Undo</button>
-              <button aria-label="Redo edit" disabled={redoStack.current.length === 0} onClick={() => travel("redo")}>Redo</button>
-              {workflowDraft && (
-                <>
-                  <button
-                    disabled={!workflowDirty}
-                    onClick={() => void saveWorkflow()}
-                  >
-                    Save workflow draft
-                  </button>
-                  <button
-                    disabled={workflowDirty || !validation.result.valid}
-                    onClick={() => void publishWorkflow()}
-                  >
-                    Publish workflow
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-          <div className="tabs">
-            <button
-              aria-pressed={view === "graph"}
-              onClick={() => setView("graph")}
-            >
-              Graph editor
-            </button>
-            <button
-              aria-pressed={view === "json"}
-              onClick={() => setView("json")}
-            >
-              JSON definition
-            </button>
-            <span
-              className={`validation ${validation.result.valid ? "valid" : "invalid"}`}
-              role="status"
-            >
-              {validation.result.valid
-                ? "✓ Valid definition"
-                : `! ${validation.result.diagnostics.length} problem(s)`}
-            </span>
-          </div>
-          {view === "json" ? <div className="editor"><div className="canvas"><textarea aria-label="Workflow JSON" spellCheck={false} value={text} onChange={(event) => editDefinition(event.target.value)} /></div><aside className="inspector"><span className="eyebrow">CANONICAL DEFINITION</span><p>JSON edits and graph edits update the same draft. Invalid JSON stays in this editor until corrected.</p></aside></div>
-            : workflow ? <WorkflowEditor key={workflowDraft?.id ?? "preview"} workflow={workflow} layout={layout} selectedNode={selectedNode} onSelect={setSelectedNode} onEdit={(value) => editDefinition(pretty(value))} onLayout={editLayout} />
-            : <div className="empty"><strong>Resolve definition errors</strong><button onClick={() => setView("json")}>Open JSON definition</button></div>}
-          <div className="problems">
-            <strong>
-              {validation.result.valid
-                ? "Preflight passed"
-                : "Definition problems"}
-            </strong>
-            {validation.result.valid ? (
-              <span>
-                {workflow?.nodes.length} nodes · {workflow?.edges.length} edges
-              </span>
-            ) : (
-              <ul>
-                {validation.result.diagnostics
-                  .slice(0, 12)
-                  .map((item, index) => (
-                    <li key={index}>
-                      <code>{item.code}</code> {item.message}
-                    </li>
-                  ))}
-              </ul>
-            )}
-          </div>
+        <section className={destination === "workflow" ? "workflow-destination" : "destination-hidden"} id="workflow" onBlurCapture={(event) => { if (["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName)) coalesceField.current = ""; }}>
+          <WorkflowScreen name={workflowDraft?.name ?? "Workflow preview"} workflow={workflow} layout={layout} text={text} selectedNode={selectedNode}
+            diagnostics={validation.result.diagnostics} state={workflowSaving ? "saving" : workflowConflict ? "conflict" : !validation.result.valid ? "invalid" : workflowDirty || !workflowVersions.find((item) => item.id === workflowVersionId && item.definition && pretty(item.definition) === pretty(workflow)) ? "draft" : "executable"}
+            versionId={workflowVersionId} ready={currentProjectReady} canPersist={!!workflowDraft && currentProjectReady && (() => { try { parseJson(text, 512 * 1024); return true; } catch { return false; } })()} hasSuite={!!suiteVersionId} canUndo={undoStack.current.length > 0} canRedo={redoStack.current.length > 0}
+            conflict={workflowConflict} snapshot={workflowSnapshot} message={message} onSelectNode={setSelectedNode}
+            onEdit={(value) => editDefinition(pretty(value))} onLayout={editLayout} onDocument={editWorkflowDocument}
+            onText={editDefinition} onBoundary={() => { coalesceField.current = ""; }} onUndo={() => travel("undo")} onRedo={() => travel("redo")}
+            onSaveVersion={() => void saveWorkflowVersion()} onSaveDraft={() => void saveWorkflow()}
+            onRun={() => { if (!workflowVersionId || !suiteVersionId) return; setRunPrefill({ from: "workflow", title: `Run workflow ${workflowVersionId.slice(0, 8)}`, workflowVersionId, suiteVersionId, mode: runMode }); setTestStep(2); navigate("testset"); }}
+            onImport={(file) => void importFile(file)} onExport={exportFile}
+            onChoice={(key, choice) => setWorkflowConflict((current) => current ? { ...current, choices: { ...current.choices, [key]: choice } } : null)}
+            onResolve={() => void resolveWorkflowConflict()} onEditMerged={editMergedWorkflowDraft} onDismissConflict={() => setWorkflowConflict(null)} onClearPath={() => { workflowPathRequest.current++; setWorkflowSnapshot(null); }} onBackResults={() => { workflowPathRequest.current++; setWorkflowSnapshot(null); navigate("results"); }} />
         </section>
+        <details className={destination === "testset" ? "secondary-tools" : "destination-hidden"}><summary>Advanced test-set JSON and versions</summary>
+        <fieldset className="test-owner-gate" disabled={!currentProjectReady}>
         <section className="m2-panel" id="scenarios">
           <div className="section-heading">
             <div>
@@ -949,11 +986,11 @@ export default function App() {
               <h2>{suiteDraft?.name ?? "Load a project to edit scenarios"}</h2>
             </div>
             <div className="row">
-              <button disabled={!suiteDirty} onClick={() => void saveSuite()}>
+              <button disabled={!currentProjectReady || !suiteDirty} onClick={() => void saveSuite()}>
                 Save suite draft
               </button>
               <button
-                disabled={!suiteDraft || suiteDirty || !workflowVersionId || !!suiteParse.issue}
+                disabled={!currentProjectReady || !suiteDraft || suiteDirty || !workflowVersionId || !!suiteParse.issue}
                 onClick={() => void publishSuite()}
               >
                 Publish suite
@@ -1036,6 +1073,9 @@ export default function App() {
             </>
           )}
         </section>
+        </fieldset>
+        </details>
+        <details className={destination === "results" ? "secondary-tools" : "destination-hidden"}><summary>Advanced run setup, exports and historical graph</summary>
         <section className="m2-panel" id="runs">
           <div className="section-heading">
             <div>
@@ -1044,14 +1084,14 @@ export default function App() {
             </div>
             <div className="row">
               <button
-                disabled={!suiteVersionId || !workflowVersionId || !selectedCase || runMode === "replay" && !sourceRunId || runMode === "live" && (!providerStatus?.allowedModes.includes("live") || !liveConsent || !preflight)}
-                onClick={() => void startRun(true)}
+                disabled={!suiteVersionId || !workflowVersionId || !selectedCase || runMode === "replay" && !sourceRunId}
+                onClick={() => prepareAdvancedRun(true)}
               >
                 Run selected case
               </button>
               <button
-                disabled={!suiteVersionId || !workflowVersionId || runMode === "replay" && !sourceRunId || runMode === "live" && (!providerStatus?.allowedModes.includes("live") || !liveConsent || !preflight)}
-                onClick={() => void startRun(false)}
+                disabled={!suiteVersionId || !workflowVersionId || runMode === "replay" && !sourceRunId}
+                onClick={() => prepareAdvancedRun(false)}
               >
                 Run full suite
               </button>
@@ -1086,7 +1126,7 @@ export default function App() {
                 ))}
               </select>
             </label>
-            <label>Execution mode<select aria-label="Execution mode" value={runMode} onChange={(event) => { setRunMode(event.target.value as "mock" | "replay" | "live"); setLiveConsent(false); }}>
+            <label>Execution mode<select aria-label="Execution mode" value={runMode} onChange={(event) => { setRunMode(event.target.value as "mock" | "replay" | "live"); }}>
               <option value="mock">Mock (offline)</option><option value="replay">Recorded Replay (offline)</option><option value="live">Live Jev</option>
             </select></label>
             {runMode === "mock" && <label>
@@ -1094,7 +1134,7 @@ export default function App() {
               <select
                 aria-label="Exact fixture set"
                 value={fixtureSetId}
-                onChange={(event) => setFixtureSetId(event.target.value)}
+                onChange={(event) => { setFixtureSetId(event.target.value); if (projectId) window.localStorage.setItem(`pathsmith.fixtureSet.${projectId}`, event.target.value); }}
               >
                 {[
                   ...new Map(
@@ -1111,19 +1151,9 @@ export default function App() {
           {runMode === "replay" && <div className="run-mode-panel">
             <label>Source run from this project<select aria-label="Replay source run" value={sourceRunId} onChange={(event) => setSourceRunId(event.target.value)}><option value="">Select a saved recording</option>{runs.filter((item) => ["completed", "failed", "canceled"].includes(item.status)).map((item) => <option key={item.id} value={item.id}>{modeLabel(item.mode)} · {item.status}{item.status === "canceled" ? ` (partial: ${item.progress.persisted}/${item.progress.selected} saved)` : ""} · {item.id.slice(0, 8)} · {new Date(item.createdAt).toLocaleString()}</option>)}</select></label>
             <p className="hint">The source recording supplies the provider profile and exact responses. Canceled runs are usable only if a final recording was saved; the server verifies this. Missing requests fail with REPLAY_MISS. Replay sends zero new provider requests.</p>
-            {sourceRunId && <p className="hint">Source provenance: {modeLabel(runs.find((item) => item.id === sourceRunId)?.mode ?? "mock")} · {runs.find((item) => item.id === sourceRunId)?.origin ?? "synthetic"}.</p>}
+            {sourceRunId && <p className="hint">Source provenance: {modeLabel(runs.find((item) => item.id === sourceRunId)?.mode ?? "mock")} · {runs.find((item) => item.id === sourceRunId)?.origin ?? "unknown"}.</p>}
           </div>}
-          {runMode === "live" && <div className="run-mode-panel live-preflight">
-            <strong>Live Jev preflight</strong>
-            <p className="notice conflict">Scenario state and question text leave this computer. Provider usage may be billed. No exact token or dollar cost is available before execution.</p>
-            {!providerStatus?.allowedModes.includes("live") && <p role="alert">Live mode is unavailable: the server needs both an enabled live flag and a configured Jev API key.</p>}
-            {preflightError && <p role="alert">Preflight failed: {preflightError}</p>}
-            {preflight && <p>Published suite: {preflight.scenarios} scenarios (selected case: 1) · Provider/model: Jev / {preflight.model} · Longest judgment path: {preflight.maxJudgments} calls per scenario · Full suite upper bound: {preflight.maxLogicalCalls} logical calls, {preflight.maxAttempts} HTTP attempts at 3 per judgment · Selected case upper bound: {preflight.maxJudgments} logical calls, {preflight.maxJudgments * 3} attempts.</p>}
-            {preflight && preflight.maxAttempts > httpAttemptLimit && <p className="notice conflict">The full suite conservative upper bound exceeds the configured attempt budget. Execution may stop when that budget is exhausted.</p>}
-            <div className="row"><label>Live request concurrency<input aria-label="Live request concurrency" type="number" min={1} max={4} value={liveConcurrency} onChange={(event) => setLiveConcurrency(Math.max(1, Math.min(4, Number(event.target.value) || 1)))} /></label><label>Maximum HTTP attempts<input aria-label="Maximum HTTP attempts" type="number" min={1} max={providerStatus?.maximumHttpAttemptLimit ?? 2000} value={httpAttemptLimit} onChange={(event) => setHttpAttemptLimit(Math.max(1, Math.min(providerStatus?.maximumHttpAttemptLimit ?? 2000, Number(event.target.value) || 1)))} /></label></div>
-            <p className="hint">At most 4 live requests are in flight process-wide. The attempt budget bounds dispatch; token totals depend on provider responses.</p>
-            <label className="check"><input type="checkbox" aria-label="Confirm live run" checked={liveConsent} disabled={!providerStatus?.allowedModes.includes("live") || !preflight} onChange={(event) => setLiveConsent(event.target.checked)} /> I consent to sending the selected scenario data and questions to Jev and possible usage charges.</label>
-          </div>}
+          {runMode === "live" && <p className="hint">Continue to Test set for the server preflight, hard-stop controls, requested model and fresh consent before queuing.</p>}
           <h3>Run history</h3>
           {runs.length === 0 ? (
             <p className="hint">No runs in this project yet.</p>
@@ -1258,32 +1288,16 @@ export default function App() {
             </div>
           )}
         </section>
-        <section className="m2-panel" id="comparisons">
-          <div className="section-heading"><div><span className="eyebrow">IMMUTABLE RUNS</span><h2>Compare baseline and candidate</h2></div></div>
-          <p className="hint">Choose completed runs with the same suite snapshot and selected case IDs. The gate is inconclusive for incomplete or incompatible pairs.</p>
-          <div className="row comparison-controls">
-            <label>Baseline run<select aria-label="Baseline run" value={baselineId} onChange={(event) => { clearComparison(); setBaselineId(event.target.value); }}><option value="">Select baseline</option>{comparisonRuns.map((item) => <option key={item.id} value={item.id}>{item.workflowName} · {item.status} · {item.id.slice(0, 8)} · {new Date(item.createdAt).toLocaleString()}</option>)}</select></label>
-            <label>Candidate run<select aria-label="Candidate run" value={candidateId} onChange={(event) => { clearComparison(); setCandidateId(event.target.value); }}><option value="">Select candidate</option>{comparisonRuns.map((item) => <option key={item.id} value={item.id}>{item.workflowName} · {item.status} · {item.id.slice(0, 8)} · {new Date(item.createdAt).toLocaleString()}</option>)}</select></label>
-            <label className="check"><input type="checkbox" checked={strictGate} onChange={(event) => { clearComparison(); setStrictGate(event.target.checked); }} /> Strict gate: any candidate assertion failure fails</label>
-            <label className="check"><input type="checkbox" checked={acceptMixedModel} onChange={(event) => { clearComparison(); setAcceptMixedModel(event.target.checked); }} /> Accept mixed model provenance</label>
-            <button disabled={!baselineId || !candidateId || baselineId === candidateId} onClick={() => void compare()}>Compare runs</button>
-          </div>
-          {comparison && <div className="comparison-report">
-            <div className="section-heading"><h3>Gate: <strong className={`gate-${comparison.gate}`}>{comparison.gate}</strong></h3><span className="hint">Baseline {comparison.baselineStatus} · Candidate {comparison.candidateStatus}</span></div>
-            <p className="hint">Run IDs: {comparison.baselineRunId} → {comparison.candidateRunId} · Strict gate: {String(comparison.policy.strict)} · Accept mixed model: {String(comparison.policy.acceptMixedModel)}</p>
-            <p className="hint">Baseline: {modeLabel(comparisonRuns.find((item) => item.id === comparison.baselineRunId)?.mode ?? "mock")} / {comparisonRuns.find((item) => item.id === comparison.baselineRunId)?.origin ?? "unknown"} · Candidate: {modeLabel(comparisonRuns.find((item) => item.id === comparison.candidateRunId)?.mode ?? "mock")} / {comparisonRuns.find((item) => item.id === comparison.candidateRunId)?.origin ?? "unknown"}. Replay preserves source provenance.</p>
-            <div className="comparison-metrics"><span>{comparison.newAssertionRegressions ?? "N/A"} new assertion regressions</span><span>{comparison.assertionImprovements ?? "N/A"} assertion improvements</span><span>{comparison.changedCases ?? "N/A"} changed behavior</span><span>{comparison.newExecutionRegressions ?? "N/A"} new execution regressions</span></div>
-            {comparison.issues.length > 0 && <div className="notice conflict"><strong>Gate reasons</strong><ul>{comparison.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
-            <p className="hint">Workflow changed: {String(comparison.workflowChanged)} · Model changed: {comparison.modelChanged === null ? "N/A" : String(comparison.modelChanged)} · Confounded: {comparison.confounded === null ? "N/A" : String(comparison.confounded)}. Improvements do not cancel regressions.</p>
-            <details><summary>Workflow and configuration diff</summary><div className="diff-grid"><div><h4>Nodes</h4><p>Added: {comparison.workflowDiff.nodes.added.join(", ") || "none"}</p><p>Removed: {comparison.workflowDiff.nodes.removed.join(", ") || "none"}</p>{comparison.workflowDiff.nodes.changed.map((item) => <details key={item.id}><summary>Changed {item.id}</summary><div className="diff-grid"><pre>Before\n{pretty(item.before)}</pre><pre>After\n{pretty(item.after)}</pre></div></details>)}</div><div><h4>Edges and schema</h4><p>Added edges: {comparison.workflowDiff.edges.added.join(", ") || "none"}</p><p>Removed edges: {comparison.workflowDiff.edges.removed.join(", ") || "none"}</p><p>Changed edges: {comparison.workflowDiff.edges.changed.map((item) => item.id).join(", ") || "none"}</p><p>Input schema: {comparison.workflowDiff.inputSchemaChanged ? "changed" : "same"} · Output schema: {comparison.workflowDiff.outputSchemaChanged ? "changed" : "same"} · Bindings: {comparison.workflowDiff.bindingsChanged ? "changed" : "same"}</p><h4>Execution configuration</h4>{comparison.configurationDiff.length ? comparison.configurationDiff.map((item) => <details key={item.key}><summary>{item.key}</summary><div className="diff-grid"><pre>Before\n{pretty(item.before)}</pre><pre>After\n{pretty(item.after)}</pre></div></details>) : <p>No configuration changes.</p>}</div></div></details>
-            <div className="row"><label>Case filter<select aria-label="Comparison case filter" value={comparisonFilter} onChange={(event) => setComparisonFilter(event.target.value)}><option value="all">All paired cases</option><option value="regression">New assertion regressions</option><option value="improvement">Improvements</option><option value="change">Changed behavior</option><option value="error">Execution regressions</option></select></label></div>
-            <div className="comparison-cases">{comparison.cases.filter((item) => comparisonFilter === "all" || comparisonFilter === "regression" && item.newAssertionRegression || comparisonFilter === "improvement" && item.assertionImprovement || comparisonFilter === "change" && item.behaviorChanged || comparisonFilter === "error" && item.newExecutionRegression).map((item) => <button key={item.scenarioId} className={selectedComparisonCase === item.scenarioId ? "selected-run" : ""} onClick={() => void selectComparisonCase(item.scenarioId)}><strong>{item.scenarioId}</strong><span>{item.newAssertionRegression ? "Regression" : item.assertionImprovement ? "Improvement" : item.newExecutionRegression ? "Execution regression" : item.unchangedFailure ? "Unchanged failure" : item.behaviorChanged ? "Behavior changed" : "No change"}</span><span>{item.baseline.outcome ?? "N/A"} → {item.candidate.outcome ?? "N/A"}</span></button>)}</div>
-            {selectedComparisonCase && comparisonSnapshots && (() => { const item = comparison.cases.find((entry) => entry.scenarioId === selectedComparisonCase); if (!item) return null; return <div className="case-comparison"><h3>{item.scenarioId}</h3><p>First observed divergence: {item.firstDivergence ? `edge ${item.firstDivergence.index + 1}: ${item.firstDivergence.baselineEdge ?? "end"} → ${item.firstDivergence.candidateEdge ?? "end"}` : "none in selected edges"}</p><div className="diff-grid"><div><h4>Baseline · {item.baseline.assertionStatus}</h4><p>{item.baseline.status} · {item.baseline.outcome ?? "N/A"}</p><WorkflowEditor workflow={comparisonSnapshots.baseline.workflow} layout={comparisonSnapshots.baseline.layout ?? {}} selectedNode="" onSelect={() => {}} selectedEdges={item.baseline.selectedEdges} visitedNodes={item.baseline.visitedNodes} /><pre>{comparisonTraces ? pretty(comparisonTraces.baseline) : "Loading baseline trace…"}</pre></div><div><h4>Candidate · {item.candidate.assertionStatus}</h4><p>{item.candidate.status} · {item.candidate.outcome ?? "N/A"}</p><WorkflowEditor workflow={comparisonSnapshots.candidate.workflow} layout={comparisonSnapshots.candidate.layout ?? {}} selectedNode="" onSelect={() => {}} selectedEdges={item.candidate.selectedEdges} visitedNodes={item.candidate.visitedNodes} /><pre>{comparisonTraces ? pretty(comparisonTraces.candidate) : "Loading candidate trace…"}</pre></div></div></div>; })()}
-          </div>}
-        </section>
-        </>}
         </details>
-      </main>
-    </div>
+        <section className={destination === "compare" ? "compare-destination" : "destination-hidden"} id="comparisons">
+          <CompareScreen runs={comparisonRuns} initialCandidateId={candidateId}
+            ownerKey={`${projectSelection.current}:${destination}`} onSelectionChanged={() => { compareActionRequest.current++; }}
+            onOpenSetup={async (owner, prefill) => { const action = ++compareActionRequest.current; if (!await comparisonOwnerReady(owner, action)) return; setRunPrefill(prefill); setTestStep(2); navigate("testset"); }}
+            onRemainder={async (record) => { const action = ++compareActionRequest.current; const owner = projectSelection.current, generation = projectRequest.current; const plan = await api<RerunPlan>(`/runs/${record.id}/rerun-plan`); if (compareActionRequest.current !== action || projectSelection.current !== owner || projectRequest.current !== generation) return; if (!await comparisonOwnerReady(record.projectId, action)) return; setRunPrefill({ from: record.id, title: `Run remaining cases from ${record.id.slice(0, 8)}`, workflowVersionId: plan.workflowVersionId, suiteVersionId: plan.suiteVersionId, selectedScenarioIds: plan.selectedScenarioIds, mode: plan.mode, sourceRunId: plan.sourceRunId, rerunPlan: plan }); setTestStep(2); navigate("testset"); }}
+            onOpenCandidate={async (record, caseId) => { const action = ++compareActionRequest.current; if (!await comparisonOwnerReady(record.projectId, action)) return; setFocusResultCaseId(caseId); await openRun(record.id); if (compareActionRequest.current !== action || projectSelection.current !== record.projectId || runSelection.current !== record.id) return; navigate("results"); }} />
+        </section>
+        </div>
+      </div>
+    </AppShell>
   );
 }

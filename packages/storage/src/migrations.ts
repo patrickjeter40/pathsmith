@@ -50,6 +50,14 @@ const migrations = [
       `UPDATE runs SET overview=json_object('summary',json_extract(report,'$.summary'),'coverage',json_extract(report,'$.coverage'),'adapters',json_extract(report,'$.adapters'),'mixedModel',json_extract(report,'$.mixedModel')) WHERE report IS NOT NULL`,
     ],
   },
+  {
+    version: 4,
+    statements: [
+      `CREATE TABLE run_reruns (workspace_id TEXT NOT NULL, project_id TEXT NOT NULL, run_id TEXT PRIMARY KEY, parent_run_id TEXT NOT NULL, FOREIGN KEY(workspace_id,project_id,run_id) REFERENCES runs(workspace_id,project_id,id) ON DELETE CASCADE, FOREIGN KEY(workspace_id,project_id,parent_run_id) REFERENCES runs(workspace_id,project_id,id) ON DELETE RESTRICT)`,
+      `CREATE INDEX run_reruns_parent ON run_reruns(workspace_id,parent_run_id)`,
+      `CREATE TRIGGER run_reruns_immutable BEFORE UPDATE ON run_reruns BEGIN SELECT RAISE(ABORT, 'Immutable rerun lineage'); END`,
+    ],
+  },
 ];
 
 export function migrate(db: BetterSQLite3Database): number {

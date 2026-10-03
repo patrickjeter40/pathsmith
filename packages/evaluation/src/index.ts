@@ -13,6 +13,12 @@ import {
   type Workflow,
 } from "@pathsmith/contracts";
 import {
+  ProviderCallControl,
+  longestJudgmentPath,
+  resolveRunControls,
+  runStopError,
+  type RunControls,
+  type RunStopReason,
   assertValid,
   canonicalize,
   evaluateExpression,
@@ -37,6 +43,8 @@ import {
   type TraceEvent,
 } from "@pathsmith/core";
 
+import { classificationRow } from "./classification.js";
+
 export const MAX_REPORT_BYTES = MAX_ARTIFACT_BYTES;
 export * from "./classification.js";
 
@@ -58,6 +66,7 @@ export interface ScenarioResult {
   visitedNodes: string[];
   selectedEdges: string[];
   logicalJudgments: number;
+  providerCalls?: number;
   actualHttpAttempts: number;
   replayedJudgments: number;
   elapsedMs: number;
@@ -187,7 +196,7 @@ export function coverage(workflow: Workflow, scenarios: ScenarioResult[]) {
     edgesTotal: edges.length,
   };
 }
-export type SummaryFacts = Pick<ScenarioResult, "scenarioId" | "status" | "started" | "assertionStatus" | "result" | "logicalJudgments" | "actualHttpAttempts" | "replayedJudgments" | "usage" | "historicalUsage">;
+export type SummaryFacts = Pick<ScenarioResult, "scenarioId" | "status" | "started" | "assertionStatus" | "result" | "logicalJudgments" | "providerCalls" | "actualHttpAttempts" | "replayedJudgments" | "usage" | "historicalUsage">;
 export function summarize(
   suite: Suite,
   selectedIds: string[],
@@ -219,6 +228,7 @@ export function summarize(
         (outcomeCounts[s.result.outcomeId] ?? 0) + 1;
   return {
     selected,
+    notRun: selected - scenarios.length + scenarios.filter((s) => !s.started).length,
     started: scenarios.filter((s) => s.started).length,
     completed,
     failedExecution,
@@ -232,6 +242,7 @@ export function summarize(
     labeledCompletedPassRate: ratio(assertionPassed, labeledCompleted),
     endToEndLabeledSuccessRate: ratio(assertionPassed, labeled),
     executionCompletionRate: ratio(completed, selected),
+    providerCalls: scenarios.some((s) => s.providerCalls === undefined) ? null : scenarios.reduce((sum, s) => sum + s.providerCalls!, 0),
     logicalJudgments: scenarios.reduce((s, r) => s + r.logicalJudgments, 0),
     actualHttpAttempts: scenarios.reduce((s, r) => s + r.actualHttpAttempts, 0),
     replayedJudgments: scenarios.reduce((s, r) => s + r.replayedJudgments, 0),
@@ -259,6 +270,9 @@ export interface RunReport {
   limits: ExecutionLimits;
   concurrency: number;
   httpAttemptLimit: number;
+  controls?: RunControls;
+  stopReason?: RunStopReason;
+  rerunOfRunId?: string;
   workflowSemanticHash: string;
   artifactHash: string;
   suiteSnapshotHash: string;
@@ -293,6 +307,8 @@ export interface RunSuiteOptions {
   concurrency?: number;
   /** Explicit override of the default 200; maximum 30,000 is a Pathsmith cap. */
   httpAttemptLimit?: number;
+  controls?: RunControls;
+  rerunOfRunId?: string;
   signal?: AbortSignal;
   workspaceId?: string;
   projectId?: string;
@@ -392,6 +408,11 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         !selection || selection.has(s.id),
     ),
     results = new Map<string, ScenarioResult>();
+  if (options.mode !== "live" && options.controls !== undefined)
+    throw new PathsmithError("RUN_LIMIT_EXCEEDED", "Provider controls apply only to live runs");
+  const controls = options.mode === "live"
+    ? resolveRunControls(options.controls, selected.length * longestJudgmentPath(workflow)) : undefined;
+  const callControl = controls ? new ProviderCallControl(controls) : undefined;
   const controller = new AbortController(),
     cancel = () => controller.abort();
   if (options.signal?.aborted) cancel();
@@ -413,6 +434,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         visitedNodes: [],
         selectedEdges: [],
         logicalJudgments: 0,
+        providerCalls: 0,
         actualHttpAttempts: 0,
         replayedJudgments: 0,
         elapsedMs: 0,
@@ -441,7 +463,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     return additions;
   };
   async function worker() {
-    while (!controller.signal.aborted && next < selected.length) {
+    while (!controller.signal.aborted && !callControl?.stopReason && next < selected.length) {
       const scenario = selected[next++];
       const execution = await executeWorkflow({
         workflow,
@@ -449,6 +471,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         bindings,
         mode: options.mode,
         httpAttemptBudget,
+        providerCallControl: callControl,
         runId: id,
         scenarioId: scenario.id,
         limits,
@@ -467,6 +490,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
         visitedNodes: execution.visitedNodes,
         selectedEdges: execution.selectedEdges,
         logicalJudgments: execution.logicalJudgments,
+        providerCalls: execution.providerCalls,
         actualHttpAttempts: execution.actualHttpAttempts,
         replayedJudgments: execution.replayedJudgments,
         elapsedMs: execution.elapsedMs,
@@ -499,6 +523,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
           visitedNodes: item.visitedNodes,
           selectedEdges: item.selectedEdges,
           logicalJudgments: item.logicalJudgments,
+          providerCalls: item.providerCalls,
           actualHttpAttempts: item.actualHttpAttempts,
           replayedJudgments: item.replayedJudgments,
           elapsedMs: item.elapsedMs,
@@ -537,6 +562,9 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
   } finally {
     options.signal?.removeEventListener("abort", cancel);
   }
+  const stopReason = callControl?.stopReason;
+  if (stopReason) for (const row of pendingRows.values())
+    row.error = toExecutionError(runStopError(stopReason), undefined, row.scenarioId);
   const scenarios = selected.map((s) => results.get(s.id) ?? pendingRows.get(s.id)!);
   const selectedScenarioIds = selected.map((s) => s.id).sort();
   const adapters = Object.fromEntries(
@@ -566,7 +594,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     workspaceId: options.workspaceId ?? "local",
     projectId: options.projectId ?? "headless",
     status:
-      storageError || scenarios.some((s) => s.status === "failed")
+      storageError || stopReason || scenarios.some((s) => s.status === "failed")
         ? "failed"
         : scenarios.some((s) => s.status === "canceled")
           ? "canceled"
@@ -583,6 +611,9 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     limits,
     concurrency,
     httpAttemptLimit,
+    ...(controls ? { controls } : {}),
+    ...(stopReason ? { stopReason } : {}),
+    ...(options.rerunOfRunId ? { rerunOfRunId: options.rerunOfRunId } : {}),
     ...workflowHashes(workflow),
     suiteSnapshotHash: hash(suite),
     selectedScenarioIds,
@@ -593,7 +624,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<RunReport> {
     scenarios,
     summary: summarize(suite, selectedScenarioIds, scenarios),
     coverage: coverage(workflow, scenarios),
-    ...(storageError ? { error: storageError } : {}),
+    ...(storageError ? { error: storageError } : stopReason ? { error: toExecutionError(runStopError(stopReason)) } : {}),
   };
   // Keep the public writer bound authoritative even for unusual metadata from
   // portable callers. Already persisted rows remain available if this fails.
@@ -625,12 +656,26 @@ export function workflowDiff(baseline: Workflow, candidate: Workflow) {
     bindingsChanged: hash(baseline.bindings) !== hash(candidate.bindings),
   };
 }
+export interface ComparisonPolicy {
+  strict?: boolean;
+  acceptMixedModel?: boolean;
+  basis?: "assertions" | "reviewed_classification";
+}
+export interface ComparisonIssue { code: string; runId?: string; scenarioIds?: string[] }
 export function compareRuns(
   baseline: RunReport,
   candidate: RunReport,
-  options: { strict?: boolean; acceptMixedModel?: boolean } = {},
+  options: ComparisonPolicy = {},
 ) {
   const issues: string[] = [];
+  const issueDetails: ComparisonIssue[] = [];
+  const basis = options.basis ?? "assertions";
+  if (!["assertions", "reviewed_classification"].includes(basis))
+    throw new PathsmithError("COMPARISON_INVALID", "Unsupported comparison basis");
+  if (baseline.mode !== candidate.mode) {
+    issues.push("Execution modes differ");
+    issueDetails.push({ code: "MODE_MISMATCH" });
+  }
   if (
     baseline.suiteSnapshotHash !== candidate.suiteSnapshotHash ||
     canonicalize(baseline.suite) !== canonicalize(candidate.suite)
@@ -651,7 +696,13 @@ export function compareRuns(
   for (const report of [baseline, candidate]) {
     const executionsById = new Map(report.scenarios.map((s) => [s.scenarioId, s]));
     const casesById = new Map(report.suite.scenarios.map((s) => [s.id, s]));
+    const selectedIds = new Set(report.selectedScenarioIds);
+    if (hash(report.suite) !== report.suiteSnapshotHash) issues.push("Suite snapshot hash does not match its content");
     if (
+      new Set(report.selectedScenarioIds).size !== report.selectedScenarioIds.length ||
+      new Set(report.suite.scenarios.map((s) => s.id)).size !== report.suite.scenarios.length ||
+      report.selectedScenarioIds.some((id) => !casesById.has(id)) ||
+      report.scenarios.some((s) => !selectedIds.has(s.scenarioId)) ||
       report.scenarios.length !== report.selectedScenarioIds.length ||
       new Set(report.scenarios.map((s) => s.scenarioId)).size !==
         report.scenarios.length ||
@@ -684,9 +735,38 @@ export function compareRuns(
   }
   const baselineById = new Map(baseline.scenarios.map((s) => [s.scenarioId,s]));
   const candidateById = new Map(candidate.scenarios.map((s) => [s.scenarioId,s]));
+  const baselineReferences = new Map(baseline.suite.scenarios.map((s) => [s.id, s]));
+  const candidateReferences = new Map(candidate.suite.scenarios.map((s) => [s.id, s]));
+  const matchingTargets = Boolean(baseline.suite.classification && candidate.suite.classification &&
+    canonicalize(baseline.suite.classification) === canonicalize(candidate.suite.classification));
+  if (basis === "reviewed_classification" && !matchingTargets) {
+    issues.push("Classification targets are absent or differ");
+    issueDetails.push({ code: "CLASSIFICATION_TARGET_MISMATCH" });
+  }
   const cases = baseline.selectedScenarioIds.flatMap((id) => {
     const a = baselineById.get(id), b = candidateById.get(id);
     if (!a || !b) return [];
+    const reference = baselineReferences.get(id);
+    const candidateReference = candidateReferences.get(id);
+    const classificationA = baseline.suite.classification && reference
+      ? classificationRow(baseline.suite, reference, a, baseline.status) : null;
+    const classificationB = candidate.suite.classification && candidateReference
+      ? classificationRow(candidate.suite, candidateReference, b, candidate.status) : null;
+    const reviewedPair = Boolean(matchingTargets &&
+      reference?.referenceLabel?.review === "reviewed" && candidateReference?.referenceLabel?.review === "reviewed" &&
+      reference.referenceLabel.value !== null && candidateReference.referenceLabel.value !== null &&
+      [baseline.suite.classification!.positiveLabel, baseline.suite.classification!.negativeLabel].includes(reference.referenceLabel.value) &&
+      canonicalize(reference.referenceLabel) === canonicalize(candidateReference.referenceLabel));
+    const completedPair = a.status === "completed" && b.status === "completed";
+    const validPredictions = Boolean(classificationA && classificationB &&
+      classificationA.predictedLabel !== null && classificationB.predictedLabel !== null);
+    const classificationInGate = reviewedPair && completedPair && validPredictions;
+    if (basis === "reviewed_classification" && reviewedPair && completedPair && !validPredictions) {
+      issues.push(`Reviewed classification prediction is missing for ${id}`);
+      issueDetails.push({ code: "MISSING_CLASSIFICATION_PREDICTION", scenarioIds: [id] });
+    }
+    const classificationRegression = classificationInGate && classificationA?.reviewedVerdict === "agree" && classificationB?.reviewedVerdict !== "agree";
+    const classificationImprovement = classificationInGate && classificationA?.reviewedVerdict !== "agree" && classificationB?.reviewedVerdict === "agree";
     const changed =
       a.result?.outcomeId !== b.result?.outcomeId ||
       canonicalize(a.selectedEdges) !== canonicalize(b.selectedEdges);
@@ -709,6 +789,13 @@ export function compareRuns(
     return [
       {
         scenarioId: id,
+        referenceLabel: reference?.referenceLabel ?? null,
+        candidateReferenceLabel: candidateReference?.referenceLabel ?? null,
+        classificationInGate,
+        newClassificationRegression: classificationRegression,
+        classificationImprovement,
+        baselineClassification: classificationA ? { predictedLabel: classificationA.predictedLabel, reviewedVerdict: classificationA.reviewedVerdict } : null,
+        candidateClassification: classificationB ? { predictedLabel: classificationB.predictedLabel, reviewedVerdict: classificationB.reviewedVerdict } : null,
         behaviorChanged: changed,
         newAssertionRegression: regression,
         assertionImprovement: improvement,
@@ -746,6 +833,28 @@ export function compareRuns(
       (c) => c.newAssertionRegression,
     ).length,
     assertionImprovements = cases.filter((c) => c.assertionImprovement).length;
+  const reviewedPairs = cases.filter((c) => c.classificationInGate).length;
+  if (basis === "reviewed_classification" && reviewedPairs === 0) {
+    issues.push("No reviewed evaluable classification pairs");
+    issueDetails.push({ code: "NO_REVIEWED_LABELS" });
+  }
+  const newClassificationRegressions = cases.filter((c) => c.newClassificationRegression).length;
+  const classificationImprovements = cases.filter((c) => c.classificationImprovement).length;
+  for (const [text, code] of [
+    ["Suite snapshots differ", "SUITE_MISMATCH"],
+    ["Selected scenario IDs differ", "SELECTION_MISMATCH"],
+    ["Run execution is incomplete", "INCOMPLETE_RUN"],
+    ["Mixed-model provenance requires explicit acceptance", "MIXED_MODEL"],
+  ]) if (issues.includes(text)) issueDetails.push({ code });
+  if (issues.some((s) => /pair|Scenario|Assertion/.test(s))) issueDetails.push({ code: "INCOMPLETE_PAIR" });
+  const candidateSelected = new Set(candidate.selectedScenarioIds);
+  const sharedIds = baseline.selectedScenarioIds.filter((id) => candidateSelected.has(id));
+  const cohort = { baselineSelected: baseline.selectedScenarioIds.length, candidateSelected: candidate.selectedScenarioIds.length,
+    sharedSelected: sharedIds.length, completedInBoth: sharedIds.filter((id) => baselineById.get(id)?.status === "completed" && candidateById.get(id)?.status === "completed").length,
+    baselineOnly: baseline.selectedScenarioIds.length - sharedIds.length, candidateOnly: candidate.selectedScenarioIds.length - sharedIds.length, reviewedPairs };
+  const gateFails = basis === "reviewed_classification"
+    ? newClassificationRegressions > 0 || (options.strict && cases.some((c) => c.classificationInGate && c.candidateClassification?.reviewedVerdict !== "agree"))
+    : newAssertionRegressions > 0 || (options.strict && candidate.scenarios.some((s) => s.assertionStatus === "failed"));
   const modelChanged = hash(baseline.adapters) !== hash(candidate.adapters),
     workflowChanged =
       baseline.workflowSemanticHash !== candidate.workflowSemanticHash;
@@ -758,16 +867,19 @@ export function compareRuns(
     selectedScenarioIds: [...baseline.selectedScenarioIds].sort(),
     gate: issues.length
       ? "inconclusive"
-      : newAssertionRegressions > 0 ||
-          (options.strict &&
-            candidate.scenarios.some((s) => s.assertionStatus === "failed"))
+      : gateFails
         ? "fail"
         : "pass",
     policy: {
+      basis,
       strict: options.strict ?? false,
       acceptMixedModel: options.acceptMixedModel ?? false,
     },
     issues: [...new Set(issues)],
+    issueDetails,
+    cohort,
+    newClassificationRegressions,
+    classificationImprovements,
     changedCases: cases.filter((c) => c.behaviorChanged).length,
     newAssertionRegressions,
     assertionImprovements,

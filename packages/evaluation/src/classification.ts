@@ -2,9 +2,11 @@ import type { Json, Scenario, Suite } from "@pathsmith/contracts";
 import type { ScenarioResult } from "./index.js";
 
 export type ClassificationFacts = Pick<ScenarioResult,
-  "scenarioId" | "status" | "outputs" | "error" | "actualHttpAttempts" | "elapsedMs">;
+  "scenarioId" | "status" | "outputs" | "error" | "actualHttpAttempts" | "elapsedMs"> & { started?: boolean };
 export const CLASSIFICATION_VERDICTS = ["true_positive", "true_negative", "false_positive", "false_negative", "unlabeled", "unclear", "missing_prediction", "error", "canceled", "interrupted", "pending", "not_run"] as const;
 export type ClassificationVerdict = typeof CLASSIFICATION_VERDICTS[number];
+export const REVIEWED_CLASSIFICATION_VERDICTS = ["agree", "missed_positive", "false_alarm", "unknown", "missing_prediction", "error", "canceled", "interrupted", "pending", "not_run"] as const;
+export type ReviewedClassificationVerdict = typeof REVIEWED_CLASSIFICATION_VERDICTS[number];
 export interface ClassificationRow {
   scenarioId: string;
   name: string;
@@ -13,7 +15,11 @@ export interface ClassificationRow {
   referenceLabel: Scenario["referenceLabel"] | null;
   predictedLabel: string | null;
   status: string;
+  /** Historical execution status, distinct from the derived primary not_run state. */
+  executionStatus: string;
+  started: boolean | null;
   verdict: ClassificationVerdict;
+  reviewedVerdict: ReviewedClassificationVerdict;
   errorCode: string | null;
   actualHttpAttempts: number;
   elapsedMs: number | null;
@@ -28,10 +34,11 @@ export function classificationRow(suite: Suite, scenario: Scenario,
   if (!target) throw new Error("This test set has no classification target");
   const answer = object(object(facts?.outputs[target.nodeId])?.[target.questionId]);
   const value = answer?.value;
-  const predictedLabel = facts?.status === "completed" && answer?.kind === "choice" &&
+  const predictedLabel = facts?.status === "completed" && facts.started !== false && answer?.kind === "choice" &&
     typeof value === "string" && [target.positiveLabel, target.negativeLabel].includes(value) ? value : null;
-  const status = facts?.status ?? (runStatus === "interrupted" ? "interrupted" :
+  const executionStatus = facts?.status ?? (runStatus === "interrupted" ? "interrupted" :
     runStatus === "canceled" ? "canceled" : ["queued", "running", "canceling"].includes(runStatus) ? "pending" : "not_run");
+  const status = facts?.started === false ? "not_run" : executionStatus;
   let verdict: ClassificationVerdict;
   if (status !== "completed") verdict = status === "failed" ? "error" : status as ClassificationVerdict;
   else if (predictedLabel === null) verdict = "missing_prediction";
@@ -40,8 +47,14 @@ export function classificationRow(suite: Suite, scenario: Scenario,
   else if (predictedLabel === target.positiveLabel)
     verdict = scenario.referenceLabel.value === target.positiveLabel ? "true_positive" : "false_positive";
   else verdict = scenario.referenceLabel.value === target.negativeLabel ? "true_negative" : "false_negative";
+  const reviewedVerdict: ClassificationRow["reviewedVerdict"] = status !== "completed"
+    ? verdict as ClassificationRow["reviewedVerdict"]
+    : predictedLabel === null ? "missing_prediction"
+    : scenario.referenceLabel?.review !== "reviewed" || scenario.referenceLabel.value === null ? "unknown"
+    : verdict === "true_positive" || verdict === "true_negative" ? "agree"
+    : verdict === "false_negative" ? "missed_positive" : "false_alarm";
   return { scenarioId: scenario.id, name: scenario.name, input: scenario.input, tags: scenario.tags,
-    referenceLabel: scenario.referenceLabel ?? null, predictedLabel, status, verdict,
+    referenceLabel: scenario.referenceLabel ?? null, predictedLabel, status, executionStatus, started: facts?.started ?? null, verdict, reviewedVerdict,
     errorCode: facts?.error?.code ?? null, actualHttpAttempts: facts?.actualHttpAttempts ?? 0,
     elapsedMs: facts?.elapsedMs ?? null };
 }
@@ -54,15 +67,17 @@ function counts() {
 type Counts = ReturnType<typeof counts>;
 function add(c: Counts, row: ClassificationRow) {
   c.selected++;
+  if (row.status === "not_run") c.notRun++;
   if (!row.referenceLabel) c.unlabeled++;
   else if (row.referenceLabel.value === null) c.unclear++;
   else c.labeled++;
-  if (row.status === "completed") c.completed++;
-  else if (row.status === "failed") c.errors++;
-  else if (row.status === "canceled") c.canceled++;
-  else if (row.status === "interrupted") c.interrupted++;
-  else if (row.status === "pending") c.pending++;
-  else c.notRun++;
+  const executionStatus = row.executionStatus ?? row.status;
+  if (executionStatus === "completed") c.completed++;
+  else if (executionStatus === "failed") c.errors++;
+  else if (executionStatus === "canceled") c.canceled++;
+  else if (executionStatus === "interrupted") c.interrupted++;
+  else if (executionStatus === "pending") c.pending++;
+  else if (row.status !== "not_run") c.notRun++;
   if (row.verdict === "missing_prediction") c.missingPrediction++;
   const field = { true_positive: "truePositive", true_negative: "trueNegative", false_positive: "falsePositive", false_negative: "falseNegative" } as const;
   if (Object.hasOwn(field, row.verdict)) { c[field[row.verdict as keyof typeof field]]++; c.evaluated++; }
@@ -97,14 +112,17 @@ export function summarizeClassification(rows: ClassificationRow[]) {
 }
 
 /** CSV escapes spreadsheet formulas as well as CSV syntax; raw values remain in JSON. */
-export function classificationCsv(rows: ClassificationRow[]): string {
+export function classificationCsv(rows: ClassificationRow[], provenance?: {
+  runId: string; runSuiteVersionId: string; labelsSuiteVersionId: string; labelsSuiteSnapshotHash: string;
+}): string {
   const cell = (value: unknown) => {
     let s = value === null || value === undefined ? "" : String(value);
     if (/^[\s]*[=+@-]/.test(s) || /^[\t\r\n]/.test(s)) s = "'" + s;
     return '"' + s.replaceAll('"', '""') + '"';
   };
-  const header = ["id", "name", "input_json", "expected_label", "label_source", "label_review", "predicted_label", "status", "result", "error", "tags_json", "http_attempts"];
+  const header = ["id", "name", "input_json", "expected_label", "label_source", "label_review", "predicted_label", "status", "result", "error", "tags_json", "http_attempts", "reviewed_result", "execution_status", ...(provenance ? ["run_id", "run_suite_version_id", "labels_suite_version_id", "labels_suite_snapshot_hash"] : [])];
   return [header.map(cell).join(","), ...rows.map((r) => [r.scenarioId, r.name, JSON.stringify(r.input),
     r.referenceLabel ? r.referenceLabel.value ?? "unclear" : "", r.referenceLabel?.source, r.referenceLabel?.review,
-    r.predictedLabel, r.status, r.verdict, r.errorCode, JSON.stringify(r.tags), r.actualHttpAttempts].map(cell).join(","))].join("\r\n");
+    r.predictedLabel, r.status, r.verdict, r.errorCode, JSON.stringify(r.tags), r.actualHttpAttempts, r.reviewedVerdict, r.executionStatus,
+    ...(provenance ? [provenance.runId, provenance.runSuiteVersionId, provenance.labelsSuiteVersionId, provenance.labelsSuiteSnapshotHash] : [])].map(cell).join(","))].join("\r\n");
 }

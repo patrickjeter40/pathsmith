@@ -104,7 +104,8 @@ class ResponseBudget implements NestInterceptor {
   }
 }
 function requestBudget(request: Request): number {
-  if (request.path === "/api/v1/runs") return 1024 * 1024;
+  if (["/api/v1/runs", "/api/v1/runs/preflight"].includes(request.path)) return 1024 * 1024;
+  if (request.path === "/api/v1/projects/import") return 9 * 1024 * 1024;
   // Import envelopes have a small allowance above the artifact's own checked limit.
   if (
     /^\/api\/v1\/(?:projects\/[^/]+\/suites|suites\/[^/]+\/draft)$/.test(
@@ -113,7 +114,7 @@ function requestBudget(request: Request): number {
   )
     return 9 * 1024 * 1024;
   if (
-    /^\/api\/v1\/(?:projects\/[^/]+\/workflows|workflows\/[^/]+\/draft)$/.test(
+    /^\/api\/v1\/(?:projects\/[^/]+\/workflows|workflows\/[^/]+\/(?:draft|save-version))$/.test(
       request.path,
     )
   )

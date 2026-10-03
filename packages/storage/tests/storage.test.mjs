@@ -104,7 +104,7 @@ test("migrations, revision conflicts, immutable snapshots, and workspace isolati
     storage = env.storage,
     data = seed(storage),
     { ctx, draft, workflowVersion } = data;
-  assert.equal(storage.schemaVersion, 3);
+  assert.equal(storage.schemaVersion, 4);
   assert.throws(() => openStorage({ dataDir: env.dataDir }), {
     code: "STORAGE_LOCKED",
   });
@@ -310,7 +310,7 @@ test("a killed process releases the OS-held data-directory lock", async (t) => {
   const exited = once(child, "exit");
   child.kill("SIGKILL");
   await exited;
-  assert.equal(env.reopen().schemaVersion, 3);
+  assert.equal(env.reopen().schemaVersion, 4);
 });
 
 test("M4 migration preserves legacy exchange rows and immutable snapshot payloads", async (t) => {
@@ -340,7 +340,7 @@ test("M4 migration preserves legacy exchange rows and immutable snapshot payload
     raw.close();
   }
   const migrated = env.reopen();
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   const check = new Database(join(env.dataDir, "pathsmith.sqlite"), {
     readonly: true,
   });
@@ -379,7 +379,7 @@ test("M5 migration adds compact projections without changing historical snapshot
   raw.exec("ALTER TABLE scenario_runs DROP COLUMN summary; ALTER TABLE runs DROP COLUMN overview; DELETE FROM schema_migrations WHERE version=3");
   raw.close();
   const migrated=env.reopen();
-  assert.equal(migrated.schemaVersion,3);
+  assert.equal(migrated.schemaVersion,4);
   assert.deepEqual(migrated.getRunOverview(seeded.ctx,run.id).report.summary,report.summary);
   assert.equal(migrated.listScenarioSummaries(seeded.ctx,run.id).total,results.length);
   assert.equal(migrated.scenarioSummaryFacts(seeded.ctx,run.id).length,results.length);
@@ -445,4 +445,23 @@ test("M4 final reports reject changed mode, provenance, accounting and model met
   } finally {
     raw.close();
   }
+});
+
+test("prototype migration adds scoped rerun links without rewriting immutable history", async (t) => {
+  const env = setup(t), storage = env.storage, seeded = seed(storage), run = seeded.queue();
+  storage.claimNextRun(seeded.ctx);
+  const report = await execute(storage, run);
+  storage.finishRun(seeded.ctx, run.id, report);
+  storage.close();
+  const raw = new Database(join(env.dataDir, "pathsmith.sqlite"));
+  const original = raw.prepare("SELECT snapshot,report FROM runs WHERE id=?").get(run.id);
+  raw.exec("DROP TABLE run_reruns; DELETE FROM schema_migrations WHERE version=4");
+  raw.close();
+  const migrated = env.reopen(); assert.equal(migrated.schemaVersion, 4);
+  const check = new Database(join(env.dataDir, "pathsmith.sqlite"), { readonly: true });
+  try {
+    assert.deepEqual(check.prepare("SELECT snapshot,report FROM runs WHERE id=?").get(run.id), original);
+    assert.deepEqual(check.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(check.prepare("SELECT COUNT(*) AS n FROM run_reruns").get().n, 0);
+  } finally { check.close(); }
 });

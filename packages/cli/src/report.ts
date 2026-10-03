@@ -6,6 +6,8 @@ import {
 } from "@pathsmith/contracts";
 import {
   assertValid,
+  longestJudgmentPath,
+  resolveRunControls,
   canonicalize,
   evaluateExpression,
   hash,
@@ -69,6 +71,10 @@ export function readRunReport(value: unknown): RunReport {
     const httpLimit = r.httpAttemptLimit ?? 200;
     if (!Number.isSafeInteger(httpLimit) || httpLimit < 1 || httpLimit > MAX_HTTP_ATTEMPTS)
       throw new Error("Invalid attempt limit");
+    if (r.controls !== undefined) {
+      if (r.mode !== "live") throw new Error("Provider controls require live mode");
+      resolveRunControls(r.controls, r.selectedScenarioIds.length * longestJudgmentPath(r.workflow));
+    }
     // Validates each source/run/scenario/node/binding scope, fingerprint, identity and normalized response.
     createReplayBindings(r);
     const casesById = new Map(r.suite.scenarios.map((c)=>[c.id,c]));
@@ -117,8 +123,13 @@ export function readRunReport(value: unknown): RunReport {
         canonicalize(s.assertions) !== canonicalize(evaluated.assertions)
       )
         throw new Error("Invalid assertion facts");
+      if (s.providerCalls !== undefined && (!Number.isSafeInteger(s.providerCalls) || s.providerCalls < 0 ||
+        s.providerCalls > s.logicalJudgments || (r.mode !== "live" && s.providerCalls !== 0)))
+        throw new Error("Invalid provider call count");
       const attempts = s.attempts ?? [];
       if (
+        (s.providerCalls !== undefined && r.mode === "live" &&
+          (s.providerCalls < s.exchanges.length || new Set(attempts.map((a) => a.nodeId)).size > s.providerCalls)) ||
         !Array.isArray(attempts) ||
         attempts.length !== s.actualHttpAttempts ||
         (r.mode !== "live" && attempts.length) ||
@@ -209,12 +220,22 @@ export function readRunReport(value: unknown): RunReport {
           ? "canceled"
           : "completed";
     const summary = summarize(r.suite, r.selectedScenarioIds, r.scenarios);
+    if (r.controls && (summary.providerCalls === null || summary.providerCalls > r.controls.maxProviderCalls))
+      throw new Error("Provider call budget exceeded or unaccounted");
+    if (r.stopReason && (!r.controls || !["PROVIDER_CALL_CAP", "CONSECUTIVE_PROVIDER_ERRORS"].includes(r.stopReason.code) ||
+      r.stopReason.providerCalls !== summary.providerCalls || r.error?.code !== r.stopReason.code ||
+      !Number.isSafeInteger(r.stopReason.consecutiveProviderErrors) || r.stopReason.consecutiveProviderErrors < 0 ||
+      (r.stopReason.code === "PROVIDER_CALL_CAP" && r.stopReason.providerCalls !== r.controls.maxProviderCalls) ||
+      (r.stopReason.code === "CONSECUTIVE_PROVIDER_ERRORS" && r.stopReason.consecutiveProviderErrors !== r.controls.stopAfterConsecutiveErrors)))
+      throw new Error("Invalid stop accounting");
     // M1�M3 mock reports lacked historicalUsage; its absence means unavailable, not zero.
     if (
       r.status !== expectedStatus ||
       summary.actualHttpAttempts > httpLimit ||
       canonicalize({
         ...r.summary,
+        providerCalls: r.summary.providerCalls ?? null,
+        notRun: r.summary.notRun ?? summary.notRun,
         historicalUsage: r.summary.historicalUsage ?? null,
       }) !== canonicalize(summary) ||
       canonicalize(r.coverage) !==

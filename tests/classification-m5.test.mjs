@@ -68,6 +68,13 @@ test("failed, interrupted, unclear and absent predictions never become correct c
   assert.equal(summary.errors,1);
   assert.equal(summary.missingPrediction,1);
   assert.equal(summary.interrupted,1);
+  assert.equal(rows[3].status,"interrupted");
+  assert.equal(rows[3].executionStatus,"interrupted");
+  assert.equal(rows[3].started,null);
+  for (const status of ["queued","running","canceling"]) {
+    const pending=classificationRow(example.suite,s,undefined,status);
+    assert.equal(pending.status,"pending"); assert.equal(pending.started,null);
+  }
   assert.equal(summary.agreement.value,1);
   assert.equal(summary.endToEndAgreement.value,0.25);
   assert.equal(summary.completion.value,0.5);

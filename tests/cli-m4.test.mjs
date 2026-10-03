@@ -96,9 +96,17 @@ test("M4 CLI replay derives profile, reports14 reused/zeroHTTP and compares2 reg
       "--out",
       comparison,
     ]).status,
-    1,
+    2,
   );
   const compared = await json(comparison);
+  assert.equal(compared.gate, "inconclusive");
+  const baselineReplay = join(env.directory, "baseline-replay.json");
+  assert.equal(env.cli(replayArgs(env, baselineReplay, basePath)).status, 1);
+  assert.equal(env.cli(["compare", "--baseline", baselineReplay, "--candidate", out, "--out", comparison]).status, 1);
+  const comparable = await json(comparison);
+  assert.equal(comparable.gate, "fail");
+  assert.equal(comparable.newAssertionRegressions, 2);
+  assert.equal(comparable.assertionImprovements, 1);
   assert.equal(compared.newAssertionRegressions, 2);
   assert.equal(compared.assertionImprovements, 1);
   assert.equal(JSON.stringify(report).includes(canary), false);
@@ -356,6 +364,6 @@ test("M4 CLI live path and comparisons work with injected transport; replay pres
   });
   assert.equal(
     env.cli(["compare", "--baseline", source, "--candidate", out]).status,
-    0,
+    2,
   );
 });

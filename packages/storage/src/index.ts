@@ -10,14 +10,20 @@ import {
 import { sql } from "drizzle-orm";
 import {
   inspectJson,
+  validateProjectFile,
+  type ProjectFile,
   validateWorkflow,
   validateSuite,
+  validateSuiteStructure,
   validateProfile,
   type Json,
   type Workflow,
 } from "@pathsmith/contracts";
 import {
   assertValid,
+  longestJudgmentPath,
+  resolveRunControls,
+  type RunControls,
   canonicalize,
   hash,
   workflowHashes,
@@ -89,6 +95,13 @@ function nameValue(value: string) {
       "Name must contain 1–200 characters",
     );
   return value.trim();
+}
+function suiteDraftDiagnostics(definition: Json) {
+  const structural = validateSuiteStructure(definition);
+  return structural.valid ? [...structural.diagnostics, {
+    code: "SUITE_WORKFLOW_UNVALIDATED", pointer: "", severity: "warning" as const,
+    message: "Draft structure is valid; validate against a published workflow before execution",
+  }] : structural.diagnostics;
 }
 const pageOptions = (options: PageOptions = {}) => {
   const offset = options.offset ?? 0,
@@ -253,6 +266,8 @@ export class SqliteStorage {
         "Cancel active runs before deleting the project",
       );
     this.db.transaction((tx) => {
+      if (tx.get(sql`SELECT 1 FROM run_reruns WHERE workspace_id=${ctx.workspaceId} AND project_id=${id}`))
+        throw new StorageError("LIFECYCLE_CONFLICT", "Delete dependent remainder runs first");
       if (
         tx.get(
           sql`SELECT 1 FROM runs WHERE workspace_id=${ctx.workspaceId} AND project_id=${id} AND source_run_id IS NOT NULL`,
@@ -319,6 +334,32 @@ export class SqliteStorage {
     };
     this.saveDraft("workflows", ctx, id, input.expectedRevision, item);
     return item;
+  }
+  saveWorkflowVersion(ctx: WorkspaceContext, id: string, input: { expectedRevision: number; definition: Json; layout: Json }) {
+    return this.db.transaction(() => {
+      assertValid(validateWorkflow(input.definition));
+      const draft = this.saveWorkflowDraft(ctx, id, input);
+      const version = this.publishWorkflowVersion(ctx, id, draft.draftRevision);
+      return { draft, version };
+    });
+  }
+  importProject(ctx: WorkspaceContext, value: unknown) {
+    assertValid(validateProjectFile(value), "PROJECT_FILE_INVALID");
+    const artifact = value as ProjectFile;
+    return this.db.transaction(() => {
+      const project = this.createProject(ctx, artifact.name);
+      const workflows = artifact.workflows.map((w) => ({ key: w.key, ...this.createWorkflow(ctx, project.id, w) }));
+      const suites = artifact.suites.map((suite) => ({ key: suite.key, ...this.createSuite(ctx, project.id, suite) }));
+      return { project, workflows, suites };
+    });
+  }
+  exportProject(ctx: WorkspaceContext, id: string): ProjectFile {
+    const project = this.getProject(ctx, id);
+    const artifact: ProjectFile = { formatVersion: "0.1", artifactType: "pathsmith_project", name: project.name,
+      workflows: this.listWorkflows(ctx, id).map((w) => ({ key: w.id, name: w.name, definition: w.definition, layout: w.layout })),
+      suites: this.listSuites(ctx, id).map((suite) => ({ key: suite.id, name: suite.name, definition: suite.definition })) };
+    assertValid(validateProjectFile(artifact), "PROJECT_FILE_INVALID");
+    return artifact;
   }
   private saveDraft(
     table: string,
@@ -390,14 +431,15 @@ export class SqliteStorage {
     input: { name: string; definition?: Json },
   ): SuiteRecord {
     this.getProject(ctx, projectId);
+    const definition = json(input.definition ?? {}, 8 * 1024 * 1024);
     const item: SuiteRecord = {
       id: randomUUID(),
       workspaceId: ctx.workspaceId,
       projectId,
       name: nameValue(input.name),
-      definition: json(input.definition ?? {}, 8 * 1024 * 1024),
+      definition,
       draftRevision: 1,
-      diagnostics: [],
+      diagnostics: suiteDraftDiagnostics(definition),
       createdAt: now(),
       updatedAt: now(),
     };
@@ -438,7 +480,7 @@ export class SqliteStorage {
       draftRevision: draft.draftRevision + 1,
       diagnostics: workflow
         ? validateSuite(definition, workflow.definition).diagnostics
-        : [],
+        : suiteDraftDiagnostics(definition),
       updatedAt: now(),
     };
     this.saveDraft("suites", ctx, id, input.expectedRevision, item);
@@ -495,7 +537,7 @@ export class SqliteStorage {
       )
       .map((row) => decode<SuiteVersion>(row.record));
   }
-  queueRun(ctx: WorkspaceContext, input: QueueRunInput): RunRecord {
+  preflightRun(ctx: WorkspaceContext, input: QueueRunInput): { snapshot: RunSnapshot; projectId: string } {
     const workflow = this.getWorkflowVersion(ctx, input.workflowVersionId),
       suite = this.getSuiteVersion(ctx, input.suiteVersionId);
     if (workflow.projectId !== suite.projectId)
@@ -661,6 +703,10 @@ export class SqliteStorage {
         ];
       }),
     );
+    const selectedCount = input.selectedScenarioIds?.length ?? suite.definition.scenarios.length;
+    if (mode !== "live" && input.controls !== undefined)
+      throw new StorageError("INVALID_REQUEST", "Provider controls apply only to live runs");
+    const controls = mode === "live" ? resolveRunControls(input.controls, selectedCount * longestJudgmentPath(workflow.definition)) : undefined;
     const snapshot: RunSnapshot = {
       workflowVersionId: workflow.id,
       suiteVersionId: suite.id,
@@ -683,16 +729,65 @@ export class SqliteStorage {
       origin,
       sourceRunId,
       httpAttemptLimit,
+      ...(controls ? { controls } : {}),
+      ...(input.rerunOfRunId ? { rerunOfRunId: input.rerunOfRunId } : {}),
       liveConfirmed: mode === "live",
       runtimeVersion: RUNTIME_VERSION,
       ...(mode === "mock" ? { fixtures: input.fixtures } : {}),
       adapters,
     };
-    const id = randomUUID();
-    this.db.run(
-      sql`INSERT INTO runs(id,workspace_id,project_id,workflow_version_id,suite_version_id,source_run_id,status,created_at,snapshot) VALUES (${id},${ctx.workspaceId},${workflow.projectId},${workflow.id},${suite.id},${sourceRunId},'queued',${now()},${encode(snapshot)})`,
-    );
-    return this.getRun(ctx, id);
+    if (input.rerunOfRunId) {
+      const parent = this.getRun(ctx, input.rerunOfRunId);
+      const plan = this.remainderPlan(ctx, parent.id);
+      if (parent.projectId !== workflow.projectId ||
+        snapshot.workflowVersionId !== parent.snapshot.workflowVersionId || snapshot.suiteVersionId !== parent.snapshot.suiteVersionId ||
+        snapshot.mode !== parent.snapshot.mode || snapshot.sourceRunId !== parent.snapshot.sourceRunId ||
+        hash(snapshot.profile) !== hash(parent.snapshot.profile) || hash(snapshot.limits) !== hash(parent.snapshot.limits) ||
+        snapshot.concurrency !== parent.snapshot.concurrency || hash(snapshot.selectedScenarioIds) !== hash(plan.selectedScenarioIds) ||
+        hash(snapshot.fixtures ?? null) !== hash(parent.snapshot.fixtures ?? null))
+        throw new StorageError("INVALID_REQUEST", "Remainder run must preserve its parent's snapshots and exact unfinished selection");
+    }
+    return { snapshot: immutable(snapshot), projectId: workflow.projectId };
+  }
+  queueRun(ctx: WorkspaceContext, input: QueueRunInput): RunRecord {
+    return this.db.transaction((tx) => {
+      const { snapshot, projectId } = this.preflightRun(ctx, input);
+      const id = randomUUID();
+      tx.run(sql`INSERT INTO runs(id,workspace_id,project_id,workflow_version_id,suite_version_id,source_run_id,status,created_at,snapshot) VALUES (${id},${ctx.workspaceId},${projectId},${snapshot.workflowVersionId},${snapshot.suiteVersionId},${snapshot.sourceRunId},'queued',${now()},${encode(snapshot)})`);
+      if (snapshot.rerunOfRunId)
+        tx.run(sql`INSERT INTO run_reruns VALUES (${ctx.workspaceId},${projectId},${id},${snapshot.rerunOfRunId})`);
+      return this.getRun(ctx, id);
+    });
+  }
+  remainderPlan(ctx: WorkspaceContext, id: string) {
+    const parent = this.getRunOverview(ctx, id);
+    if (["queued", "running", "canceling"].includes(parent.status))
+      throw new StorageError("LIFECYCLE_CONFLICT", "Wait for a terminal run before choosing remaining cases");
+    const completed = new Set(this.scenarioSummaryFacts(ctx, id).filter((s) => s.status === "completed").map((s) => s.scenarioId));
+    const selectedScenarioIds = parent.snapshot.selectedScenarioIds.filter((id) => !completed.has(id));
+    if (!selectedScenarioIds.length) throw new StorageError("LIFECYCLE_CONFLICT", "No unfinished cases remain");
+    const maxCalls = selectedScenarioIds.length * longestJudgmentPath(parent.snapshot.workflow);
+    const controls = parent.snapshot.mode === "live" ? resolveRunControls(parent.snapshot.controls ? {
+      ...parent.snapshot.controls, maxProviderCalls: Math.min(parent.snapshot.controls.maxProviderCalls, maxCalls),
+    } : undefined, maxCalls) : undefined;
+    return { rerunOfRunId: id, workflowVersionId: parent.snapshot.workflowVersionId,
+      suiteVersionId: parent.snapshot.suiteVersionId, mode: parent.snapshot.mode, selectedScenarioIds,
+      originalSelected: parent.snapshot.selectedScenarioIds.length, originalCompleted: completed.size,
+      sourceRunId: parent.snapshot.sourceRunId, profile: parent.snapshot.profile, limits: parent.snapshot.limits,
+      controls: controls ?? null, concurrency: parent.snapshot.concurrency, httpAttemptLimit: parent.snapshot.httpAttemptLimit ?? 200 };
+  }
+  queueRemainder(ctx: WorkspaceContext, id: string, input: {
+    liveConfirmed?: boolean; controls?: RunControls; httpAttemptLimit?: number; adapters?: RunReport["adapters"];
+  }): RunRecord {
+    const parent = this.getRun(ctx, id), plan = this.remainderPlan(ctx, id);
+    return this.queueRun(ctx, { workflowVersionId: plan.workflowVersionId, suiteVersionId: plan.suiteVersionId,
+      mode: plan.mode, selectedScenarioIds: plan.selectedScenarioIds, profile: plan.profile,
+      limits: plan.limits, concurrency: plan.concurrency, rerunOfRunId: id,
+      httpAttemptLimit: input.httpAttemptLimit ?? plan.httpAttemptLimit,
+      controls: input.controls ?? plan.controls ?? undefined,
+      ...(plan.sourceRunId ? { sourceRunId: plan.sourceRunId } : {}),
+      ...(plan.mode === "mock" ? { fixtures: parent.snapshot.fixtures } : {}),
+      ...(plan.mode === "live" ? { liveConfirmed: input.liveConfirmed, adapters: input.adapters } : {}) });
   }
   private runRow(row: RunRow): RunRecord {
     return {
@@ -852,6 +947,9 @@ export class SqliteStorage {
       );
     const attempts = result.attempts ?? [];
     if (
+      (result.providerCalls !== undefined && (!Number.isSafeInteger(result.providerCalls) || result.providerCalls < 0 ||
+        result.providerCalls > result.logicalJudgments || (run.snapshot.mode !== "live" && result.providerCalls !== 0) ||
+        (run.snapshot.mode === "live" && (result.providerCalls < result.exchanges.length || new Set(attempts.map((a) => a.nodeId)).size > result.providerCalls)))) ||
       result.actualHttpAttempts !== attempts.length ||
       attempts.some(
         (a) =>
@@ -958,6 +1056,15 @@ export class SqliteStorage {
       report.sourceRunId !== snapshot.sourceRunId ||
       report.runtimeVersion !== snapshot.runtimeVersion ||
       report.httpAttemptLimit !== (snapshot.httpAttemptLimit ?? 200) ||
+      hash(report.controls ?? null) !== hash(snapshot.controls ?? (snapshot.mode === "live" ? resolveRunControls(undefined, snapshot.selectedScenarioIds.length * longestJudgmentPath(snapshot.workflow)) : null)) ||
+      (report.rerunOfRunId ?? null) !== (snapshot.rerunOfRunId ?? null) ||
+      (snapshot.controls !== undefined && (report.summary.providerCalls === null || report.summary.providerCalls > snapshot.controls.maxProviderCalls)) ||
+      (report.stopReason !== undefined && (!snapshot.controls ||
+        !["PROVIDER_CALL_CAP", "CONSECUTIVE_PROVIDER_ERRORS"].includes(report.stopReason.code) ||
+        report.error?.code !== report.stopReason.code || report.stopReason.providerCalls !== report.summary.providerCalls ||
+        !Number.isSafeInteger(report.stopReason.consecutiveProviderErrors) || report.stopReason.consecutiveProviderErrors < 0 ||
+        (report.stopReason.code === "PROVIDER_CALL_CAP" && report.stopReason.providerCalls !== snapshot.controls.maxProviderCalls) ||
+        (report.stopReason.code === "CONSECUTIVE_PROVIDER_ERRORS" && report.stopReason.consecutiveProviderErrors !== snapshot.controls.stopAfterConsecutiveErrors))) ||
       report.summary.actualHttpAttempts > (snapshot.httpAttemptLimit ?? 200) ||
       report.status !==
         (report.error || report.scenarios.some((s) => s.status === "failed")
@@ -1015,7 +1122,7 @@ export class SqliteStorage {
       for (const result of report.scenarios)
         this.appendScenarioResult(ctx, id, result);
       tx.run(
-        sql`UPDATE runs SET status=${report.status},completed_at=${now()},report=${encode(report)},overview=${encode({summary:report.summary,coverage:report.coverage,adapters:report.adapters,mixedModel:report.mixedModel})},error=${report.error ? encode(report.error) : null} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
+        sql`UPDATE runs SET status=${report.status},completed_at=${now()},report=${encode(report)},overview=${encode({summary:report.summary,coverage:report.coverage,adapters:report.adapters,mixedModel:report.mixedModel,...(report.stopReason ? {stopReason:report.stopReason} : {})})},error=${report.error ? encode(report.error) : null} WHERE workspace_id=${ctx.workspaceId} AND id=${id}`,
       );
     });
     this.appendCache=undefined;
@@ -1078,11 +1185,11 @@ export class SqliteStorage {
   }
   classificationFacts(ctx: WorkspaceContext, runId: string, nodeId: string, questionId: string): (ClassificationFacts & {traceId:string})[] {
     this.assertRunExists(ctx, runId);
-    return this.db.all<{id:string;scenario_id:string;status:string;answer:string|null;error:string|null;attempts:number;elapsed:number}>(sql`SELECT id,scenario_id,
-      json_extract(summary,'$.status') AS status,json_extract(summary,'$.classificationAnswer') AS answer,json_extract(summary,'$.error') AS error,
+    return this.db.all<{id:string;scenario_id:string;status:string;started:number|null;answer:string|null;error:string|null;attempts:number;elapsed:number}>(sql`SELECT id,scenario_id,
+      json_extract(summary,'$.status') AS status,json_extract(summary,'$.started') AS started,json_extract(summary,'$.classificationAnswer') AS answer,json_extract(summary,'$.error') AS error,
       json_extract(summary,'$.actualHttpAttempts') AS attempts,json_extract(summary,'$.elapsedMs') AS elapsed
       FROM scenario_runs WHERE workspace_id=${ctx.workspaceId} AND run_id=${runId} ORDER BY position`).map((r) => ({
-        traceId:r.id,scenarioId:r.scenario_id,status:r.status as ScenarioResult["status"],
+        traceId:r.id,scenarioId:r.scenario_id,status:r.status as ScenarioResult["status"],...(r.started===null?{}:{started:Boolean(r.started)}),
         outputs:r.answer ? {[nodeId]:{[questionId]:decode<Json>(r.answer)}} : {},
         ...(r.error ? {error:decode<ExecutionError>(r.error)} : {}),actualHttpAttempts:r.attempts,elapsedMs:r.elapsed }));
   }
@@ -1121,6 +1228,8 @@ export class SqliteStorage {
   }
   deleteRun(ctx: WorkspaceContext, id: string): void {
     const run = this.getRun(ctx, id);
+    if (this.db.get(sql`SELECT 1 FROM run_reruns WHERE workspace_id=${ctx.workspaceId} AND parent_run_id=${id}`))
+      throw new StorageError("LIFECYCLE_CONFLICT", "Delete dependent remainder runs first");
     if (["queued", "running", "canceling"].includes(run.status))
       throw new StorageError(
         "LIFECYCLE_CONFLICT",

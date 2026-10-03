@@ -494,11 +494,31 @@ A completed execution is an assertion pass only when every expectation passes. A
 
 Unlabeled scenarios have `assertionStatus: "not_evaluated"`; never count them as correct. A manual-review outcome can be an expected successful outcome. Provider timeouts, cancellation, missing recordings, and invalid response bodies are execution statuses, never business outcomes.
 
+Classification reports can explicitly select a newer published label version
+from the same suite lineage. Selected inputs and the target must be unchanged;
+only reference labels are overlaid. Original run snapshots, expectations, outputs
+and traces remain immutable. Reports/exports identify both label versions and
+changed-reference counts. Generated provenance is preserved when reviewed.
+Known unstarted executions have classification status/verdict `not_run`; their
+original status is exposed separately as `executionStatus`, including in CSV.
+Absent partial rows retain pending/interrupted provenance and unknown start state.
+Not-run counts may overlap legacy cancellation counts and must not be added to them.
+
 ### 10.3 Suite execution
 
 Snapshot the selected scenario list, workflow, suite, profile, and limits before starting. Validate every selected scenario before the first live request. Run scenarios with bounded concurrency, preserving their original IDs for pairing and stable display order.
 
 Persist each completed scenario and its traces incrementally. A bad scenario must not erase already completed results. Queue-level cancellation stops dispatching new work and signals in-flight executions; it cannot promise that already submitted requests will be unbilled.
+
+Live runs share atomic provider-call admission across all workers. The call cap
+defaults to selected count times longest judgment path (zero for zero-judgment
+workflows). Consecutive terminal provider errors, in completion order, stop at an
+explicit threshold of 1–20 (default five); retries are attempts, not separate
+logical errors. Success resets the streak until an error stop latches. Cap-only
+stops permit bounded retries of admitted calls; error stops block further attempt
+admissions, even after an earlier cap stop. Submitted requests may still settle.
+Completed results remain saved. `providerCalls`, `actualHttpAttempts`, stop reason
+and unstarted/not-run counts are distinct. The existing HTTP attempt cap remains.
 
 ### 10.4 Reported counts and denominators
 
@@ -540,7 +560,7 @@ Full observed branch coverage does not establish correct behavior. The example s
 
 ### 11.3 Baseline/candidate pairing
 
-A standard comparison requires the same suite snapshot hash and the same selected scenario IDs. Pair by ID, never by row order. Missing cases and input/expectation changes make the comparison incomplete or incompatible; do not silently intersect the sets and issue a pass verdict.
+A standard comparison requires the same execution mode, the same suite snapshot hash and full content, and the same unique selected scenario IDs with complete one-to-one execution pairs. Pair by ID, never by row order. Missing cases and input/expectation changes make the comparison incomplete or incompatible; do not silently intersect the sets and issue a pass verdict.
 
 Report per-case:
 
@@ -565,6 +585,14 @@ A workflow diff shows added/removed nodes and edges, changed questions/rubrics/s
 Outcome distribution changes are descriptive counts for the selected cohort. Do not attach significance claims or automatically judge the desired direction.
 
 ### 11.5 Release-gate policy
+
+Comparison policy now explicitly selects `assertions` (the compatible default) or
+`reviewed_classification`. The latter uses saved typed predictions and reviewed,
+non-null binary reference labels; provisional/unclear/unlabeled cases are outside
+the gate. Missing target predictions on any required reviewed pair, or no reviewed
+evaluable pairs, make the gate inconclusive. Assertion and classification
+regressions retain distinct names. An alternate label-scoring view never silently
+changes a comparison's immutable expectation basis. See decision 005.
 
 The default comparison gate fails on any new assertion regression. Any incomplete, incompatible, canceled, interrupted, or failed execution produces an inconclusive/error gate rather than a clean pass. Display improvements separately; they do not cancel new failures numerically.
 
@@ -657,6 +685,14 @@ On restart, mark abandoned queued/running/canceling jobs as `interrupted`. Prese
 
 Use polling for progress in v0.1, approximately once per second while a run is active. Server-sent events and WebSockets are unnecessary for the first milestone.
 
+A user can explicitly run the remaining cases of a terminal run under a new run
+ID with `rerunOfRunId`. Original snapshots and completed results remain unchanged;
+the child selection is exactly the original unfinished cases. Live mode requires
+fresh consent. An inherited call cap is normalized to the smaller cohort bound.
+The child does not complete the parent or establish a full-cohort comparison.
+Migration 4 records scoped immutable parent relationships and protects parents
+from deletion while dependent remainder runs exist.
+
 ### 13.3 Retention and deletion
 
 Full local run data is retained because traces and exact replay need it. State clearly that local storage is not application-level encrypted in the MVP. Do not claim automatic personal-data removal.
@@ -693,7 +729,22 @@ Prefix routes with `/api/v1`. Validate requests on the server. IDs and paths are
 | `GET /runs/:id/export` | Explicit full run export with replay/provenance data. |
 | `DELETE /runs/:id`, `DELETE /projects/:id` | Explicit confirmed deletion with dependency checks. |
 
-`POST /runs` accepts workflow/suite version IDs, selected scenario IDs, mode, sanitized binding profile, limits, and optional source run ID. A single-scenario inspector run uses a one-case immutable suite snapshot. Avoid a separate execution path for it.
+Additional production interaction routes (decision 005):
+
+| Route | Behavior |
+|---|---|
+| `POST /runs/preflight` | Validate setup and return call/attempt bounds without execution. |
+| `GET /runs/:id/rerun-plan`, `POST /runs/:id/rerun` | Inspect and explicitly queue unfinished cases under a new ID. |
+| `GET /runs/:id/classification[/rows|/export]?labelsSuiteVersionId=...` | Immutable published-label scoring view; never a rerun. |
+| `POST /workflows/:id/save-version` | Atomic optimistic draft update and immutable publication. |
+| `POST /projects/import`, `GET /projects/:id/export` | Bounded content-only portable project drafts; no server paths. |
+
+Imported suite drafts receive shared schema diagnostics. Safe invalid drafts are
+allowed; structurally valid drafts without workflow validation carry an explicit
+`SUITE_WORKFLOW_UNVALIDATED` warning. Publication still validates semantics against
+the selected published workflow before a draft can be executed.
+
+`POST /runs` accepts workflow/suite version IDs, selected scenario IDs, mode, sanitized binding profile, limits, optional live `controls: {maxProviderCalls, stopAfterConsecutiveErrors}`, and optional source run ID. A single-scenario inspector run uses a one-case immutable suite snapshot. Avoid a separate execution path for it.
 
 Use `400` for malformed envelopes, `404` for missing scoped IDs, `409` for draft or lifecycle conflicts, and `422` for invalid executable content. Never trust a client-supplied workspace ID or a frontend validation result.
 
@@ -1005,6 +1056,16 @@ Do not start hosted-service work until the local cycle is demonstrated. The next
 Import up to 10,000 examples subject to suite/input byte limits, with optional reference labels and their source/review state. Run an explicit sample or full immutable selection, show measured confusion counts, completion/errors, tag slices and row evidence, and export CSV/JSON for external LLM review. Keep graph/JSON authoring available under Advanced. In-app generative analysis is a follow-up.
 
 **Exit:** measured persisted 10,000-example offline run, reviewed/provisional label denominators verified, import/report browser flow demonstrated, partial/canceled/interrupted reports remain honest, and existing replay/security/portable-runtime regressions pass. See `docs/decisions/004-m5-classification-evaluation.md` for the additive contract and bounds.
+
+### Post-M5 — Prototype interaction integration
+
+The authorized prototype adds production label rescoring, call/error stops,
+explicit remainder runs, reviewed classification gates, genuine conflict
+reconciliation, atomic version saves, and local project files. Implement in
+reviewed visual, backend, and interaction phases under
+`docs/decisions/005-prototype-production-contracts.md`. Prototype-only fake
+conflicts, canned histories and completion estimates are replaced by actual
+persisted behavior. The support-routing expectations remain intentional.
 
 ## 22. Engineering instructions and deferred decisions
 

@@ -16,6 +16,7 @@ import {
   assertValid,
   immutable,
   PathsmithError,
+  PathsmithDeadlineError,
   toExecutionError,
   type ExecutionError,
 } from "./error.js";
@@ -32,6 +33,8 @@ import type {
   EvaluationResponse,
   Exchange,
 } from "./provider.js";
+
+import { ProviderCallControl, longestJudgmentPath, resolveRunControls } from "./run-controls.js";
 
 export const RUNTIME_VERSION = "0.1.0";
 export interface ExecutionLimits {
@@ -82,6 +85,7 @@ interface ExecutionBase {
   visitedNodes: string[];
   selectedEdges: string[];
   logicalJudgments: number;
+  providerCalls: number;
   actualHttpAttempts: number;
   replayedJudgments: number;
   usage: Usage | null;
@@ -106,6 +110,7 @@ export interface ExecuteOptions {
   mode: ExecutionMode;
   /** Shared by suite workers; reserved synchronously immediately before HTTP dispatch. */
   httpAttemptBudget?: HttpAttemptBudget;
+  providerCallControl?: ProviderCallControl;
   runId?: string;
   scenarioId?: string | null;
   signal?: AbortSignal;
@@ -217,6 +222,11 @@ export async function executeWorkflow(
       "RUN_LIMIT_EXCEEDED",
       "Invalid shared HTTP attempt budget",
     );
+  const callControl = options.mode === "live"
+    ? options.providerCallControl ?? new ProviderCallControl(resolveRunControls(undefined, longestJudgmentPath(workflow)))
+    : undefined;
+  let activeProviderCall = false;
+  let providerCalls = 0;
   let acceptingAttempts = true;
   let logicalJudgments = 0,
     sequence = 0,
@@ -243,17 +253,14 @@ export async function executeWorkflow(
   const timer = setTimeout(
     () =>
       controller.abort(
-        new PathsmithError("RUN_LIMIT_EXCEEDED", "Scenario deadline exceeded"),
+        new PathsmithDeadlineError("Scenario deadline exceeded"),
       ),
     limits.scenarioDeadlineMs,
   );
   const check = () => {
     if (controller.signal.aborted) throw controller.signal.reason;
     if (performance.now() - started > limits.scenarioDeadlineMs)
-      throw new PathsmithError(
-        "RUN_LIMIT_EXCEEDED",
-        "Scenario deadline exceeded",
-      );
+      throw new PathsmithDeadlineError("Scenario deadline exceeded");
   };
   const emit = (kind: string, data: unknown = {}, nodeId = activeNode) => {
     const event: TraceEvent = {
@@ -295,6 +302,7 @@ export async function executeWorkflow(
     visitedNodes,
     selectedEdges,
     logicalJudgments,
+    providerCalls,
     actualHttpAttempts: attempts.length,
     replayedJudgments: options.mode === "replay" ? exchanges.length : 0,
     usage:
@@ -366,6 +374,12 @@ export async function executeWorkflow(
         const callStarted = performance.now();
         const callAttempts: ProviderAttemptRecord[] = [];
         const bindingName = node.binding;
+        if (callControl) {
+          check();
+          callControl.admit();
+          providerCalls++;
+          activeProviderCall = true;
+        }
         const response = await withAbort(
           binding.adapter.evaluate(request, {
             signal: controller.signal,
@@ -384,6 +398,7 @@ export async function executeWorkflow(
             responseByteLimit: limits.providerResponseBytes,
             onAttemptStarted(attempt) {
               check();
+              callControl?.beforeAttempt();
               if (
                 !acceptingAttempts ||
                 options.mode !== "live" ||
@@ -444,7 +459,6 @@ export async function executeWorkflow(
             "PROVIDER_INVALID_RESPONSE",
             "Synthetic mock responses must not report billed usage",
           );
-        reserve(response, limits.providerResponseBytes);
         if (
           options.mode === "live" &&
           (!callAttempts.length ||
@@ -454,6 +468,11 @@ export async function executeWorkflow(
             "PROVIDER_INVALID_RESPONSE",
             "Live adapter omitted transport accounting",
           );
+        if (callControl) {
+          activeProviderCall = false;
+          emit("provider_call_finished", callControl.settled("success"));
+        }
+        reserve(response, limits.providerResponseBytes);
         const saved = immutable(response);
         const usage =
           options.mode === "live"
@@ -566,12 +585,20 @@ export async function executeWorkflow(
     }
     throw new PathsmithError("WORKFLOW_INVALID", "Execution did not terminate");
   } catch (error) {
+    const cause = controller.signal.aborted ? controller.signal.reason : error;
     const failure = toExecutionError(
-        controller.signal.aborted ? controller.signal.reason : error,
+        cause,
         activeNode,
         scenarioId ?? undefined,
       ),
       status = failure.code === "RUN_CANCELED" ? "canceled" : "failed";
+    if (activeProviderCall && callControl) {
+      const providerFailure = failure.code.startsWith("PROVIDER_") ||
+        failure.code === "EXECUTION_FAILED" ||
+        cause instanceof PathsmithDeadlineError;
+      const settled = callControl.settled(providerFailure ? "error" : "excluded");
+      try { emit("provider_call_finished", settled); } catch { /* retain original failure */ }
+    }
     acceptingAttempts = false;
     for (const attempt of attempts.filter((a) => a.status === "in_flight")) {
       attempt.status = status === "canceled" ? "canceled" : "failed";
@@ -601,7 +628,10 @@ async function withAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
-  if (signal.aborted) throw signal.reason;
+  if (signal.aborted) {
+    void promise.catch(() => {}); // The adapter may have synchronously canceled before returning its promise.
+    throw signal.reason;
+  }
   let listener: () => void = () => {};
   try {
     return await Promise.race([

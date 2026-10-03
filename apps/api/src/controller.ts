@@ -16,9 +16,9 @@ import {
   type ExecutionProfile,
   type Workflow,
 } from "@pathsmith/contracts";
-import type { ExecutionLimits, ExecutionMode } from "@pathsmith/core";
-import { CLASSIFICATION_VERDICTS, type ClassificationVerdict } from "@pathsmith/evaluation";
-import { LocalApplication, type ClassificationReport } from "./service.js";
+import type { ExecutionLimits, ExecutionMode, RunControls } from "@pathsmith/core";
+import { CLASSIFICATION_VERDICTS, REVIEWED_CLASSIFICATION_VERDICTS, type ClassificationVerdict, type ReviewedClassificationVerdict } from "@pathsmith/evaluation";
+import { LocalApplication, type ClassificationReport, type RunRequest } from "./service.js";
 import {
   badRequest,
   confirmed,
@@ -69,6 +69,13 @@ export class ApiController {
       this.local.context,
       textValue(body.name),
     );
+  }
+  @Post("projects/import") importProject(@Body() value: unknown) {
+    const body = envelope(value, ["artifact"], ["artifact"]);
+    return this.local.storage.importProject(this.local.context, body.artifact);
+  }
+  @Get("projects/:id/export") exportProject(@Param("id") id: string) {
+    return this.local.storage.exportProject(this.local.context, identifier(id));
   }
   @Get("projects/:id") project(@Param("id") id: string) {
     return this.local.storage.getProject(this.local.context, identifier(id));
@@ -121,6 +128,12 @@ export class ApiController {
         ...(Object.hasOwn(body, "layout") ? { layout: body.layout } : {}),
       },
     );
+  }
+  @Post("workflows/:id/save-version") saveWorkflowVersion(@Param("id") id: string, @Body() value: unknown) {
+    const body = envelope(value, ["expectedRevision", "definition", "layout"], ["expectedRevision", "definition", "layout"]);
+    return this.local.storage.saveWorkflowVersion(this.local.context, identifier(id), {
+      expectedRevision: revision(body.expectedRevision), definition: body.definition, layout: body.layout,
+    });
   }
   @Post("workflows/:id/validate") @HttpCode(200) validateWorkflow(
     @Param("id") id: string,
@@ -231,6 +244,35 @@ export class ApiController {
     );
   }
   @Post("runs") @HttpCode(202) queue(@Body() value: unknown) {
+    return this.local.queue(this.runInput(value));
+  }
+  @Post("runs/preflight") @HttpCode(200) preflight(@Body() value: unknown) {
+    return this.local.preflight(this.runInput(value, true));
+  }
+  @Get("runs/:id/rerun-plan") rerunPlan(@Param("id") id: string) {
+    return this.local.storage.remainderPlan(this.local.context, identifier(id));
+  }
+  @Post("runs/:id/rerun") @HttpCode(202) rerun(@Param("id") id: string, @Body() value: unknown) {
+    const body = envelope(value, ["scope", "confirmLive", "controls", "httpAttemptLimit"], ["scope"]);
+    if (body.scope !== "remaining") badRequest("Select the remaining case scope");
+    if (body.confirmLive !== undefined && body.confirmLive !== true) badRequest("Explicit live confirmation must be true");
+    this.attemptLimit(body.httpAttemptLimit);
+    return this.local.rerun(identifier(id), { confirmLive: body.confirmLive as true | undefined,
+      controls: this.controls(body.controls), httpAttemptLimit: body.httpAttemptLimit as number | undefined });
+  }
+  private controls(value: unknown): RunControls | undefined {
+    if (value === undefined) return undefined;
+    const body = envelope(value, ["maxProviderCalls", "stopAfterConsecutiveErrors"], ["maxProviderCalls", "stopAfterConsecutiveErrors"]);
+    if (!Number.isSafeInteger(body.maxProviderCalls) || (body.maxProviderCalls as number) < 0 ||
+      !Number.isSafeInteger(body.stopAfterConsecutiveErrors) || (body.stopAfterConsecutiveErrors as number) < 1 || (body.stopAfterConsecutiveErrors as number) > 20)
+      badRequest("Provider call cap must be a nonnegative integer and consecutive error stop must be 1–20");
+    return body as unknown as RunControls;
+  }
+  private attemptLimit(value: unknown): void {
+    if (value !== undefined && (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > MAX_HTTP_ATTEMPTS))
+      badRequest("HTTP attempt limit must be between 1 and 30,000");
+  }
+  private runInput(value: unknown, preflight = false): RunRequest {
     const body = envelope(
       value,
       [
@@ -245,6 +287,7 @@ export class ApiController {
         "sourceRunId",
         "confirmLive",
         "httpAttemptLimit",
+        "controls",
       ],
       ["workflowVersionId", "suiteVersionId"],
     );
@@ -267,7 +310,7 @@ export class ApiController {
       badRequest("Replay requires a source run only");
     if (
       mode === "live" &&
-      (body.confirmLive !== true ||
+      ((!preflight && body.confirmLive !== true) ||
         body.fixtureSetId !== undefined ||
         body.sourceRunId !== undefined)
     )
@@ -303,7 +346,7 @@ export class ApiController {
         (body.concurrency as number) > 16)
     )
       badRequest("Concurrency must be between 1 and 16");
-    return this.local.queue({
+    return {
       workflowVersionId: identifier(body.workflowVersionId),
       suiteVersionId: identifier(body.suiteVersionId),
       mode: mode as ExecutionMode,
@@ -317,11 +360,12 @@ export class ApiController {
           : undefined,
       confirmLive: body.confirmLive as boolean | undefined,
       httpAttemptLimit: body.httpAttemptLimit as number | undefined,
+      controls: this.controls(body.controls),
       profile: body.profile as unknown as ExecutionProfile | undefined,
       limits: body.limits as Partial<ExecutionLimits> | undefined,
       selectedScenarioIds: selection(body.selectedScenarioIds),
       concurrency: body.concurrency as number | undefined,
-    });
+    };
   }
   @Get("runs") runs(@Query() query: Record<string, unknown>) {
     const page = pagination(query, ["projectId"]);
@@ -340,7 +384,7 @@ export class ApiController {
     );
     const policy = envelope(
       body.policy,
-      ["strict", "acceptMixedModel"],
+      ["strict", "acceptMixedModel", "basis"],
       ["strict", "acceptMixedModel"],
     );
     if (
@@ -348,12 +392,15 @@ export class ApiController {
       typeof policy.acceptMixedModel !== "boolean"
     )
       badRequest("Comparison policy values must be booleans");
+    if (policy.basis !== undefined && !["assertions", "reviewed_classification"].includes(policy.basis as string))
+      badRequest("Unsupported comparison basis");
     return this.local.compare(
       identifier(body.baselineRunId),
       identifier(body.candidateRunId),
       {
         strict: policy.strict as boolean,
         acceptMixedModel: policy.acceptMixedModel as boolean,
+        basis: policy.basis as "assertions" | "reviewed_classification" | undefined,
       },
     );
   }
@@ -365,20 +412,23 @@ export class ApiController {
   @Get("runs/:id/export") exportRun(@Param("id") id: string) {
     return this.local.exportRun(identifier(id));
   }
-  @Get("runs/:id/classification") classification(@Param("id") id:string): ClassificationReport {
-    return this.local.classificationReport(identifier(id));
+  @Get("runs/:id/classification") classification(@Param("id") id:string, @Query() query: Record<string, unknown>): ClassificationReport {
+    if (Object.keys(query).some((key) => key !== "labelsSuiteVersionId")) badRequest("Unsupported scoring query");
+    return this.local.classificationReport(identifier(id), query.labelsSuiteVersionId === undefined ? undefined : identifier(query.labelsSuiteVersionId));
   }
   @Get("runs/:id/classification/rows") classificationRows(@Param("id") id:string,@Query() query:Record<string,unknown>) {
-    const page=pagination(query,["verdict","review","tag"]);
+    const page=pagination(query,["verdict","reviewedVerdict","review","tag","labelsSuiteVersionId"]);
     if (query.verdict!==undefined && !CLASSIFICATION_VERDICTS.includes(query.verdict as ClassificationVerdict)) badRequest("Unknown result filter");
+    if (query.reviewedVerdict!==undefined && (typeof query.reviewedVerdict!=="string" || !REVIEWED_CLASSIFICATION_VERDICTS.includes(query.reviewedVerdict as ReviewedClassificationVerdict))) badRequest("Unknown reviewed result filter");
     if (query.review!==undefined && !["reviewed","provisional"].includes(query.review as string)) badRequest("Unknown label review filter");
     if (query.tag!==undefined && (typeof query.tag!=="string" || query.tag.length>200)) badRequest("Invalid tag filter");
     return this.local.classificationRows(identifier(id),{...page,verdict:query.verdict as ClassificationVerdict|undefined,
-      review:query.review as string|undefined,tag:query.tag as string|undefined});
+      reviewedVerdict:query.reviewedVerdict as ReviewedClassificationVerdict|undefined,
+      review:query.review as string|undefined,tag:query.tag as string|undefined,labelsSuiteVersionId:query.labelsSuiteVersionId===undefined?undefined:identifier(query.labelsSuiteVersionId)});
   }
   @Get("runs/:id/classification/export") exportClassification(@Param("id") id:string,@Query() query:Record<string,unknown>) {
-    if (Object.keys(query).some((key)=>key!=="format") || !["json","csv"].includes(query.format as string)) badRequest("Select json or csv export format");
-    return this.local.exportClassification(identifier(id),query.format as "json"|"csv");
+    if (Object.keys(query).some((key)=>!["format","labelsSuiteVersionId"].includes(key)) || !["json","csv"].includes(query.format as string)) badRequest("Select json or csv export format");
+    return this.local.exportClassification(identifier(id),query.format as "json"|"csv",query.labelsSuiteVersionId===undefined?undefined:identifier(query.labelsSuiteVersionId));
   }
   @Get("runs/:id/snapshot") snapshot(@Param("id") id: string) {
     return this.local.snapshot(identifier(id));

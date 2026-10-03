@@ -208,6 +208,14 @@ test("M4 persisted replay, report export, comparison and source deletion protect
     candidateRunId: replayed.id,
     policy: { strict: false, acceptMixedModel: false },
   });
+  assert.equal(comparison.body.gate, "inconclusive");
+  const baselineReplayQueue = await env.request("/runs", "POST", { ...versions(loaded), mode: "replay", sourceRunId: source.id });
+  const baselineReplay = await terminal(env, baselineReplayQueue.body.id);
+  const comparable = await env.request("/comparisons", "POST", { baselineRunId: baselineReplay.id, candidateRunId: replayed.id,
+    policy: { strict: false, acceptMixedModel: false } });
+  assert.equal(comparable.body.gate, "fail");
+  assert.equal(comparable.body.newAssertionRegressions, 2); assert.equal(comparable.body.assertionImprovements, 1);
+  await env.request(`/runs/${baselineReplay.id}`, "DELETE", { confirm: true });
   assert.equal(comparison.body.newAssertionRegressions, 2);
   assert.equal(comparison.body.assertionImprovements, 1);
   const report = (await env.request(`/runs/${replayed.id}/export`)).body;

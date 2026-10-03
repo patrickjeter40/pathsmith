@@ -679,6 +679,10 @@ export function validateWorkflow(value: unknown): ValidationResult {
   return result(diagnostics);
 }
 
+/** Validate only the suite document structure; execution additionally requires validateSuite against a workflow. */
+export function validateSuiteStructure(value: unknown): ValidationResult {
+  return result(shape(value, validators.suite, 8 * 1024 * 1024));
+}
 export function validateSuite(
   value: unknown,
   workflow: Workflow,

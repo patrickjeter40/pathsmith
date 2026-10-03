@@ -24,15 +24,39 @@ function csvCells(text: string): string[][] {
   return rows;
 }
 
-export function parseExamples(text: string, format: "lines" | "csv", positive: string, negative: string): ImportRow[] {
+export function parseExamples(text: string, format: "lines" | "csv" | "jsonl", positive: string, negative: string): ImportRow[] {
   const clean = text.replace(/^\uFEFF/, "");
+  if (new TextEncoder().encode(clean).length > 8 * 1024 * 1024) throw new Error("Import exceeds the 8 MiB test-set limit.");
+  if (format === "jsonl") {
+    const lines = clean.split(/\r\n|\n|\r/);
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length > 10000) throw new Error("Import exceeds 10,000 JSONL rows.");
+    return lines.map((line, index) => {
+      try {
+        const value: unknown = JSON.parse(line);
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object");
+        const row = value as Record<string, unknown>;
+        if (Object.keys(row).some((key) => !["content", "expected_label", "source", "tags"].includes(key))) throw new Error("Unsupported field");
+        if (typeof row.content !== "string" || !row.content.trim() || row.content.length > 8000) throw new Error("Content must be 1–8,000 characters");
+        if (row.expected_label !== undefined && row.expected_label !== null && (typeof row.expected_label !== "string" || ![positive, negative].includes(row.expected_label))) throw new Error("Expected label must match a classification option or be null");
+        if (row.source !== undefined && (typeof row.source !== "string" || !["generated", "human", "unknown"].includes(row.source))) throw new Error("Unknown source");
+        if (row.tags !== undefined && (!Array.isArray(row.tags) || row.tags.some((tag) => typeof tag !== "string" || !tag.trim() || tag.length > 200))) throw new Error("Tags must be nonempty strings of at most 200 characters");
+        if (Array.isArray(row.tags) && new Set(row.tags).size !== row.tags.length) throw new Error("Tags must be unique");
+        return { content: row.content, label: row.expected_label === null ? "unclear" : (row.expected_label as string | undefined) ?? "", source: (row.source ?? "unknown") as ImportRow["source"], tags: (row.tags ?? []) as string[], issue: "" };
+      } catch (error) {
+        return { content: "", label: "", source: "unknown", tags: [], issue: `Line ${index + 1}: ${error instanceof SyntaxError ? "Invalid JSON" : String(error instanceof Error ? error.message : error)}` };
+      }
+    });
+  }
   if (format === "lines") {
     const lines = clean.split(/\r\n|\n|\r/);
     if (lines.at(-1) === "") lines.pop();
+    if (lines.length > 10000) throw new Error("Import exceeds 10,000 rows.");
     return lines.map((content) => ({ content, label: "", source: "unknown", tags: [], issue: "" }));
   }
   const table = csvCells(clean);
   if (!table.length) return [];
+  if (table.length > 10001) throw new Error("Import exceeds 10,000 CSV rows.");
   const header = table.shift()!.map((value) => value.trim().toLowerCase());
   const contentColumn = header.indexOf("content");
   if (contentColumn < 0) throw new Error("CSV needs a content column.");

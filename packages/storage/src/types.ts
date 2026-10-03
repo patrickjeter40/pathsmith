@@ -10,6 +10,7 @@ import type {
   ExecutionError,
   ExecutionLimits,
   ExecutionMode,
+  RunControls,
 } from "@pathsmith/core";
 import type { RunReport, ScenarioResult } from "@pathsmith/evaluation";
 
@@ -85,6 +86,8 @@ export interface RunSnapshot {
   origin: "synthetic" | "live";
   sourceRunId: string | null;
   httpAttemptLimit: number;
+  controls?: RunControls;
+  rerunOfRunId?: string;
   liveConfirmed: boolean;
   runtimeVersion: string;
   fixtures?: Fixtures;
@@ -104,7 +107,7 @@ export interface RunRecord {
   completedScenarios: number;
 }
 export type RunOverview = Omit<RunRecord, "report"> & {
-  report: Pick<RunReport, "summary" | "coverage" | "adapters" | "mixedModel"> | null;
+  report: Pick<RunReport, "summary" | "coverage" | "adapters" | "mixedModel" | "stopReason"> | null;
 };
 export interface QueueRunInput {
   workflowVersionId: string;
@@ -117,6 +120,8 @@ export interface QueueRunInput {
   mode?: ExecutionMode;
   sourceRunId?: string;
   httpAttemptLimit?: number;
+  controls?: RunControls;
+  rerunOfRunId?: string;
   liveConfirmed?: boolean;
   /** Server-derived adapter identities; never accepted from HTTP clients. */
   adapters?: RunReport["adapters"];

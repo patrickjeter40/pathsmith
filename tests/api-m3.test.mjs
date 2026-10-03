@@ -134,7 +134,7 @@ test("M3 HTTP compares immutable cross-project runs with explicit default and st
   assert.equal(comparison.workflowChanged, true);
   assert.equal(comparison.modelChanged, false);
   assert.equal(comparison.confounded, false);
-  assert.deepEqual(comparison.policy, policy);
+  assert.deepEqual(comparison.policy, { ...policy, basis: "assertions" });
   assert.deepEqual(comparison.issues, []);
   assert.deepEqual(comparison.configurationDiff, []);
   assert.ok(

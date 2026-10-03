@@ -2,6 +2,7 @@ import {
   canonicalize,
   immutable,
   PathsmithError,
+  PathsmithDeadlineError,
   validateResponse,
   validUsage,
   type EvaluationRequest,
@@ -129,10 +130,7 @@ export function createJevProvider(options: JevOptions): JudgmentProvider {
           free = await acquire(parentSignal);
         } catch {
           check(context, deadlineAt);
-          throw new PathsmithError(
-            "RUN_LIMIT_EXCEEDED",
-            "Scenario deadline exceeded before HTTP dispatch",
-          );
+          throw new PathsmithDeadlineError("Scenario deadline exceeded before HTTP dispatch");
         }
         try {
           check(context, deadlineAt);
@@ -212,10 +210,7 @@ export function createJevProvider(options: JevOptions): JudgmentProvider {
             );
             record.status = "canceled";
           } else if (Date.now() >= deadlineAt || deadlineSignal.aborted) {
-            failure = new PathsmithError(
-              "RUN_LIMIT_EXCEEDED",
-              "Scenario deadline exceeded",
-            );
+            failure = new PathsmithDeadlineError("Scenario deadline exceeded");
           } else if (timeout.signal.aborted) {
             failure = new PathsmithError(
               "PROVIDER_TIMEOUT",
@@ -256,10 +251,7 @@ export function createJevProvider(options: JevOptions): JudgmentProvider {
           baseBackoffMs * 2 ** (attempt - 1) * (0.75 + 0.5 * jitter);
         const delay = retryAfter ?? backoff;
         if (delay >= deadlineAt - Date.now())
-          throw new PathsmithError(
-            "RUN_LIMIT_EXCEEDED",
-            "Retry delay exceeds remaining scenario deadline",
-          );
+          throw new PathsmithDeadlineError("Retry delay exceeds remaining scenario deadline");
         await wait(delay, context.signal);
       }
       throw new PathsmithError(
@@ -401,10 +393,7 @@ function check(context: ProviderContext, deadlineAt: number) {
   if (context.signal.aborted)
     throw new PathsmithError("RUN_CANCELED", "Live request was canceled");
   if (Date.now() >= deadlineAt)
-    throw new PathsmithError(
-      "RUN_LIMIT_EXCEEDED",
-      "Scenario deadline exceeded",
-    );
+    throw new PathsmithDeadlineError("Scenario deadline exceeded");
 }
 function parseRetryAfter(value: string | null): number | null {
   if (value === null) return null;
